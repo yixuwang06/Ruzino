@@ -97,6 +97,35 @@ TEST(CreateRHI, multiple_widgets)
     window.run();
 }
 
+TEST(WindowEventSystem, unsubscribe_any_removes_only_target_subscription)
+{
+    WindowEventSystem events;
+
+    int first_calls = 0;
+    int second_calls = 0;
+
+    auto first_id = events.subscribe_any(
+        "prim_selected", [&first_calls](const std::any&) { ++first_calls; });
+    auto second_id = events.subscribe_any(
+        "prim_selected", [&second_calls](const std::any&) { ++second_calls; });
+
+    events.emit_any("prim_selected", std::any());
+    EXPECT_EQ(first_calls, 1);
+    EXPECT_EQ(second_calls, 1);
+
+    events.unsubscribe_any("prim_selected", first_id);
+    events.emit_any("prim_selected", std::any());
+
+    EXPECT_EQ(first_calls, 1);
+    EXPECT_EQ(second_calls, 2);
+
+    events.unsubscribe_any("prim_selected", second_id);
+    events.emit_any("prim_selected", std::any());
+
+    EXPECT_EQ(first_calls, 1);
+    EXPECT_EQ(second_calls, 2);
+}
+
 #include "GUI/ImGuiFileDialog.h"
 
 class FileWidget : public IWidget {

@@ -1,5 +1,6 @@
 #include "path.h"
 
+#include <algorithm>
 #include <random>
 
 #include "../surfaceInteraction.h"
@@ -29,9 +30,9 @@ GfVec3f PathIntegrator::EstimateOutGoingRadiance(
     SurfaceInteraction si;
     if (!Intersect(ray, si)) {
         if (recursion_depth == 0) {
-            return IntersectDomeLight(ray);
+            GfVec3f intersectPos;
+            return IntersectLights(ray, intersectPos);
         }
-
         return GfVec3f{ 0, 0, 0 };
     }
 
@@ -49,8 +50,28 @@ GfVec3f PathIntegrator::EstimateOutGoingRadiance(
     GfVec3f color{ 0 };
     GfVec3f directLight = EstimateDirectLight(si, uniform_float);
 
-    // HW7_TODO: Estimate global lighting here.
     GfVec3f globalLight = GfVec3f{ 0.f };
+    GfVec3f wi;
+    float pdf = 0.0f;
+    GfVec3f brdf = si.Sample(wi, pdf, uniform_float);
+    float cosTheta = std::max(0.0f, GfDot(si.shadingNormal, wi));
+
+    if (pdf > 1E-6f && cosTheta > 0.0f) {
+        float continueProb = recursion_depth < 3 ? 1.0f : 0.8f;
+        if (uniform_float() < continueProb) {
+            GfVec3f offsetNormal =
+                GfDot(wi, si.geometricNormal) >= 0.0f ? si.geometricNormal
+                                                      : -si.geometricNormal;
+            GfRay bounceRay;
+            bounceRay.SetPointAndDirection(
+                si.position + 0.0001f * offsetNormal, wi);
+
+            GfVec3f bouncedRadiance = EstimateOutGoingRadiance(
+                bounceRay, uniform_float, recursion_depth + 1);
+            globalLight = GfCompMult(brdf, bouncedRadiance) *
+                          (cosTheta / (pdf * continueProb));
+        }
+    }
 
     color = directLight + globalLight;
 

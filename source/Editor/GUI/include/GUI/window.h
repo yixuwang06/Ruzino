@@ -1,10 +1,11 @@
 #pragma once
 
 #include <any>
+#include <cstdint>
 #include <functional>
 #include <string>
-#include <vector>
 #include <unordered_map>
+#include <vector>
 
 #include "GUI/api.h"
 #include "widget.h"
@@ -19,16 +20,39 @@ class GUI_API WindowEventSystem {
    public:
     using EventCallback = std::function<void(const std::string& event_data)>;
     using EventCallbackAny = std::function<void(const std::any& event_data)>;
-    
-    void subscribe(const std::string& event_name, EventCallback callback);
-    void subscribe_any(const std::string& event_name, EventCallbackAny callback);
-    
+    using SubscriptionId = std::uint64_t;
+
+    SubscriptionId subscribe(
+        const std::string& event_name,
+        EventCallback callback);
+    SubscriptionId subscribe_any(
+        const std::string& event_name,
+        EventCallbackAny callback);
+
+    void unsubscribe(
+        const std::string& event_name,
+        SubscriptionId subscription_id);
+    void unsubscribe_any(
+        const std::string& event_name,
+        SubscriptionId subscription_id);
+
     void emit(const std::string& event_name, const std::string& event_data = "");
     void emit_any(const std::string& event_name, const std::any& event_data);
-    
+
    private:
-    std::unordered_map<std::string, std::vector<EventCallback>> subscribers_;
-    std::unordered_map<std::string, std::vector<EventCallbackAny>> subscribers_any_;
+    struct Subscriber {
+        SubscriptionId id = 0;
+        EventCallback callback;
+    };
+
+    struct SubscriberAny {
+        SubscriptionId id = 0;
+        EventCallbackAny callback;
+    };
+
+    std::unordered_map<std::string, std::vector<Subscriber>> subscribers_;
+    std::unordered_map<std::string, std::vector<SubscriberAny>> subscribers_any_;
+    SubscriptionId next_subscription_id_ = 1;
 };
 
 // Represents a window in a GUI application, providing basic functionalities

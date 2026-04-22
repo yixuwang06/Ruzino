@@ -49,7 +49,7 @@ void Hd_RUZINO_Renderer::Render(HdRenderThread* renderThread)
 //    auto integrator = std::make_shared<AOIntegrator>(
 //        camera_, static_cast<Hd_RUZINO_RenderBuffer*>(_aovBindings[0].renderBuffer), renderThread);
 
-     auto integrator = std::make_shared<DirectLightIntegrator>(
+     auto integrator = std::make_shared<PathIntegrator>(
         camera_, static_cast<Hd_RUZINO_RenderBuffer*>(_aovBindings[0].renderBuffer), renderThread);
 
     integrator->rtc_scene = _rtcScene;

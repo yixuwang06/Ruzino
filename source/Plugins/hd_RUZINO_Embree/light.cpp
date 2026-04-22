@@ -1,5 +1,7 @@
 #include "light.h"
 
+#include <cmath>
+
 #include <spdlog/spdlog.h>
 
 #include "pxr/base/gf/plane.h"
@@ -276,8 +278,6 @@ void Hd_RUZINO_Dome_Light::Finalize(HdRenderParam* renderParam)
     Hd_RUZINO_Light::Finalize(renderParam);
 }
 
-// HW7_TODO: write the following, you should refer to the sphere light.
-
 void Hd_RUZINO_Distant_Light::Sync(
     HdSceneDelegate* sceneDelegate,
     HdRenderParam* renderParam,
@@ -341,12 +341,65 @@ Color Hd_RUZINO_Rect_Light::Sample(
     float& sample_light_pdf,
     const std::function<float()>& uniform_float)
 {
-    return {};
+    if (area <= 1E-8f) {
+        sample_light_pdf = 0.0f;
+        return Color{ 0.0f };
+    }
+
+    float u = uniform_float();
+    float v = uniform_float();
+    sampled_light_pos = corner0 + u * edgeU + v * edgeV;
+
+    GfVec3f toLight = sampled_light_pos - pos;
+    float distance2 = GfDot(toLight, toLight);
+    if (distance2 <= 1E-8f) {
+        sample_light_pdf = 0.0f;
+        return Color{ 0.0f };
+    }
+
+    float distance = std::sqrt(distance2);
+    dir = toLight / distance;
+
+    float cosLight = std::abs(GfDot(normal, -dir));
+    if (cosLight <= 1E-6f) {
+        sample_light_pdf = 0.0f;
+        return Color{ 0.0f };
+    }
+
+    sample_light_pdf = distance2 / (area * cosLight);
+    return irradiance / M_PI;
 }
 
 Color Hd_RUZINO_Rect_Light::Intersect(const GfRay& ray, float& depth)
 {
-    return {};
+    depth = std::numeric_limits<float>::infinity();
+    if (area <= 1E-8f) {
+        return Color{ 0.0f };
+    }
+
+    GfVec3f rayDir = GfVec3f(ray.GetDirection());
+    float denom = GfDot(normal, rayDir);
+    if (std::abs(denom) <= 1E-6f) {
+        return Color{ 0.0f };
+    }
+
+    GfVec3f rayOrigin = GfVec3f(ray.GetStartPoint());
+    float t = GfDot(corner0 - rayOrigin, normal) / denom;
+    if (t <= 0.0f) {
+        return Color{ 0.0f };
+    }
+
+    GfVec3f hitPos = GfVec3f(ray.GetPoint(t));
+    GfVec3f local = hitPos - corner0;
+
+    float u = GfDot(local, edgeU) / GfDot(edgeU, edgeU);
+    float v = GfDot(local, edgeV) / GfDot(edgeV, edgeV);
+    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) {
+        return Color{ 0.0f };
+    }
+
+    depth = t;
+    return irradiance / M_PI;
 }
 
 void Hd_RUZINO_Rect_Light::Sync(
@@ -373,13 +426,26 @@ void Hd_RUZINO_Rect_Light::Sync(
     corner3 = GfVec3f(
         transform.TransformAffine(GfVec3f(0.5 * width, 0.5 * height, 0)));
 
+    edgeU = corner2 - corner0;
+    edgeV = corner1 - corner0;
+    auto normalVec = GfCross(edgeU, edgeV);
+    area = normalVec.GetLength();
+    if (area > 1E-8f) {
+        normal = normalVec / area;
+    } else {
+        normal = GfVec3f(0.0f, 0.0f, 1.0f);
+    }
+
     auto diffuse = sceneDelegate->GetLightParamValue(id, HdLightTokens->diffuse)
                        .Get<float>();
+    auto intensity =
+        sceneDelegate->GetLightParamValue(id, HdLightTokens->intensity)
+            .GetWithDefault<float>();
     power = sceneDelegate->GetLightParamValue(id, HdLightTokens->color)
-                .Get<GfVec3f>() *
-            diffuse;
+                 .Get<GfVec3f>() *
+            diffuse * intensity;
 
-    // HW7_TODO: calculate irradiance
+    irradiance = area > 1E-8f ? power / area : GfVec3f(0.0f);
 }
 
 RUZINO_NAMESPACE_CLOSE_SCOPE

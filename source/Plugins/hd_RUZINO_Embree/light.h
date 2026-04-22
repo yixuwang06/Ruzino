@@ -134,13 +134,18 @@ class Hd_RUZINO_Rect_Light : public Hd_RUZINO_Light {
         override;
 
    private:
-    GfVec3f corner0;
-    GfVec3f corner1;
-    GfVec3f corner2;
-    GfVec3f corner3;
-    float width;
-    float height;
-    GfVec3f power;
-};
+     GfVec3f corner0;
+     GfVec3f corner1;
+     GfVec3f corner2;
+     GfVec3f corner3;
+     GfVec3f edgeU;
+     GfVec3f edgeV;
+     GfVec3f normal;
+     float width;
+     float height;
+     float area;
+     GfVec3f power;
+     GfVec3f irradiance;
+ };
 
 RUZINO_NAMESPACE_CLOSE_SCOPE

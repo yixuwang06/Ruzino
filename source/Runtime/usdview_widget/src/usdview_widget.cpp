@@ -837,6 +837,19 @@ void UsdviewEngine::CreateGLContext()
 
 UsdviewEngine::~UsdviewEngine()
 {
+    if (window) {
+        if (selection_subscription_id_ != 0) {
+            window->events().unsubscribe_any(
+                "prim_selected", selection_subscription_id_);
+        }
+
+        if (camera_transform_subscription_id_ != 0) {
+            window->events().unsubscribe_any(
+                "camera_transform_modified",
+                camera_transform_subscription_id_);
+        }
+    }
+
     // Save camera state before destruction
     if (engine_status.cam_type == CamType::Third && free_camera_) {
         auto* third_camera =
@@ -989,7 +1002,7 @@ void UsdviewEngine::subscribe_to_selection_events()
 {
     if (!selection_event_subscribed_ && window) {
         selection_event_subscribed_ = true;
-        window->events().subscribe_any(
+        selection_subscription_id_ = window->events().subscribe_any(
             "prim_selected", [this](const std::any& event_data) {
                 try {
                     const auto& path = std::any_cast<pxr::SdfPath>(event_data);
@@ -1006,7 +1019,7 @@ void UsdviewEngine::subscribe_to_camera_transform_events()
 {
     if (!camera_transform_event_subscribed_ && window) {
         camera_transform_event_subscribed_ = true;
-        window->events().subscribe_any(
+        camera_transform_subscription_id_ = window->events().subscribe_any(
             "camera_transform_modified", [this](const std::any& event_data) {
                 on_camera_transform_modified();
             });

@@ -26,7 +26,7 @@ NODE_EXECUTION_FUNCTION(shadow_mapping)
     texture_desc.array_size = lights.size();
     // texture_desc.array_size = 1;
     texture_desc.size = GfVec2i(resolution);
-    texture_desc.format = HdFormatUNorm8Vec4;
+    texture_desc.format = HdFormatFloat32;
     auto shadow_map_texture = resource_allocator.create(texture_desc);
 
     auto shaderPath = params.get_input<std::string>("Shader");
@@ -111,7 +111,7 @@ NODE_EXECUTION_FUNCTION(shadow_mapping)
                 depth_texture_for_opengl->texture_id,
                 0);
 
-            glClearColor(0.f, 0.f, 0.f, 1.0f);
+            glClearColor(1.f, 1.f, 1.f, 1.0f);
             glClear(
                 GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
                 GL_STENCIL_BUFFER_BIT);

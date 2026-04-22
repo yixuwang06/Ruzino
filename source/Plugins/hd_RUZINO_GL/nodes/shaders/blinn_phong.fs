@@ -14,7 +14,7 @@ struct Light {
 };
 
 layout(binding = 0) buffer lightsBuffer {
-Light lights[4];
+  Light lights[];
 };
 
 uniform vec2 iResolution;
@@ -32,30 +32,82 @@ uniform int light_count;
 
 layout(location = 0) out vec4 Color;
 
-void main() {
-vec2 uv = gl_FragCoord.xy / iResolution;
+float ComputeShadowVisibility(int lightIndex, vec3 worldPos, vec3 worldNormal, vec3 lightDir)
+{
+    vec4 lightClip =
+        lights[lightIndex].light_projection *
+        lights[lightIndex].light_view *
+        vec4(worldPos, 1.0);
 
-vec3 pos = texture2D(position,uv).xyz;
-vec3 normal = texture2D(normalMapSampler,uv).xyz;
+    if (lightClip.w <= 0.0) {
+        return 1.0;
+    }
 
-vec4 metalnessRoughness = texture2D(metallicRoughnessSampler,uv);
-float metal = metalnessRoughness.x;
-float roughness = metalnessRoughness.y;
+    vec3 shadowCoord = lightClip.xyz / lightClip.w;
+    shadowCoord = shadowCoord * 0.5 + 0.5;
 
-for(int i = 0; i < light_count; i ++) {
+    if (shadowCoord.x < 0.0 || shadowCoord.x > 1.0 ||
+        shadowCoord.y < 0.0 || shadowCoord.y > 1.0 ||
+        shadowCoord.z < 0.0 || shadowCoord.z > 1.0) {
+        return 1.0;
+    }
 
-float shadow_map_value = texture(shadow_maps, vec3(uv, lights[i].shadow_map_id)).x;
+    float closestDepth = texture(
+        shadow_maps,
+        vec3(shadowCoord.xy, lights[lightIndex].shadow_map_id)).x;
+    float bias = max(0.0025 * (1.0 - max(dot(worldNormal, lightDir), 0.0)), 0.0005);
 
-// Visualization of shadow map
-Color += vec4(shadow_map_value, 0, 0, 1);
-
-// HW6_TODO: first comment the line above ("Color +=..."). That's for quick Visualization.
-// You should first do the Blinn Phong shading here. You can use roughness to modify alpha. Or you can pass in an alpha value through the uniform above.
-
-// After finishing Blinn Phong shading, you can do shadow mapping with the help of the provided shadow_map_value. You will need to refer to the node, node_render_shadow_mapping.cpp, for the light matrices definition. Then you need to fill the mat4 light_projection; mat4 light_view; with similar approach that we fill position and color.
-// For shadow mapping, as is discussed in the course, you should compare the value "position depth from the light's view" against the "blocking object's depth.", then you can decide whether it's shadowed.
-
-// PCSS is also applied here.
+    return (shadowCoord.z - bias <= closestDepth) ? 1.0 : 0.0;
 }
 
+void main() {
+    vec2 uv = gl_FragCoord.xy / iResolution;
+
+    vec3 pos = texture(position, uv).xyz;
+    vec3 normal = normalize(texture(normalMapSampler, uv).xyz);
+    vec3 albedo = texture(diffuseColorSampler, uv).xyz;
+
+    if (dot(normal, normal) < 1E-8) {
+        Color = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
+    vec4 metalnessRoughness = texture(metallicRoughnessSampler, uv);
+    float metal = clamp(metalnessRoughness.x, 0.0, 1.0);
+    float roughness = clamp(metalnessRoughness.y, 0.0, 1.0);
+
+    float ks = 0.8 * metal;
+    float kd = 1.0 - ks;
+    float shininess = mix(4.0, 128.0, 1.0 - roughness);
+
+    vec3 viewDir = normalize(camPos - pos);
+    vec3 ambient = 0.03 * albedo;
+    vec3 result = ambient;
+
+    for (int i = 0; i < light_count; i++) {
+        vec3 lightVec = lights[i].position - pos;
+        float distanceToLight = length(lightVec);
+        if (distanceToLight < 1E-6) {
+            continue;
+        }
+
+        vec3 lightDir = lightVec / distanceToLight;
+        vec3 halfDir = normalize(lightDir + viewDir);
+
+        float attenuation = 1.0 / max(
+            distanceToLight * distanceToLight,
+            max(lights[i].radius * lights[i].radius, 1E-4));
+
+        float diffuseFactor = max(dot(normal, lightDir), 0.0);
+        float specularFactor = pow(max(dot(normal, halfDir), 0.0), shininess);
+        float shadowVisibility = ComputeShadowVisibility(i, pos, normal, lightDir);
+
+        vec3 directLight =
+            kd * albedo * lights[i].color * diffuseFactor +
+            ks * lights[i].color * specularFactor;
+
+        result += shadowVisibility * attenuation * directLight;
+    }
+
+    Color = vec4(result, 1.0);
 }

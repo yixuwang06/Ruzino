@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -105,12 +106,14 @@ class USDVIEW_WIDGET_API UsdviewEngine final : public IWidget {
 
     // Selection highlight support
     bool selection_event_subscribed_ = false;
+    std::uint64_t selection_subscription_id_ = 0;
     void subscribe_to_selection_events();
     void on_prim_selected(const pxr::SdfPath& path);
     pxr::SdfPath current_selected_path_;  // Track current selection
 
     // Camera transform synchronization support
     bool camera_transform_event_subscribed_ = false;
+    std::uint64_t camera_transform_subscription_id_ = 0;
     void subscribe_to_camera_transform_events();
     void on_camera_transform_modified();
 

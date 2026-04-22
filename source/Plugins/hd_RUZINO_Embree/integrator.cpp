@@ -256,7 +256,8 @@ Color Integrator::EstimateDirectLight(
     auto brdfVal = si.Eval(wi);
     GfVec3f contribution_by_sample_lights{ 0 };
 
-    if (this->VisibilityTest(
+    if (sample_light_pdf > 0.0f &&
+        this->VisibilityTest(
             si.position + 0.0001f * si.geometricNormal, sampled_light_pos)) {
         contribution_by_sample_lights =
             GfCompMult(sample_light_luminance, brdfVal) *

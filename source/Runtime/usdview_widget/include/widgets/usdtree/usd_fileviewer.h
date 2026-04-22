@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/prim.h>
 
@@ -78,5 +80,7 @@ class USDVIEW_WIDGET_API UsdFileViewer : public IWidget {
     std::vector<pxr::SdfPath> all_materials_cache;
     bool materials_cache_dirty = true;
     bool viewport_event_subscribed = false;
+    std::uint64_t viewport_pick_subscription_id_ = 0;
+    std::uint64_t camera_transform_subscription_id_ = 0;
 };
 RUZINO_NAMESPACE_CLOSE_SCOPE

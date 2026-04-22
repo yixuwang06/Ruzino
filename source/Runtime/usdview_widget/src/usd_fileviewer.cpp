@@ -1436,7 +1436,7 @@ bool UsdFileViewer::BuildUI()
     // Subscribe to viewport pick events on first frame
     if (!viewport_event_subscribed && window) {
         viewport_event_subscribed = true;
-        window->events().subscribe_any(
+        viewport_pick_subscription_id_ = window->events().subscribe_any(
             "viewport_prim_picked", [this](const std::any& event_data) {
                 try {
                     const auto& path = std::any_cast<pxr::SdfPath>(event_data);
@@ -1451,7 +1451,7 @@ bool UsdFileViewer::BuildUI()
             });
 
         // Subscribe to camera transform modified events to invalidate cache
-        window->events().subscribe_any(
+        camera_transform_subscription_id_ = window->events().subscribe_any(
             "camera_transform_modified", [this](const std::any& event_data) {
                 // If the modification came from the Inspector itself, ignore it
                 // This prevents cache invalidation which leads to drift over
@@ -1487,6 +1487,20 @@ UsdFileViewer::UsdFileViewer(Stage* stage) : stage(stage)
 
 UsdFileViewer::~UsdFileViewer()
 {
+    if (!window) {
+        return;
+    }
+
+    if (viewport_pick_subscription_id_ != 0) {
+        window->events().unsubscribe_any(
+            "viewport_prim_picked", viewport_pick_subscription_id_);
+    }
+
+    if (camera_transform_subscription_id_ != 0) {
+        window->events().unsubscribe_any(
+            "camera_transform_modified",
+            camera_transform_subscription_id_);
+    }
 }
 
 void UsdFileViewer::subscribe_to_viewport_events()

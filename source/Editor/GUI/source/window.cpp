@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <utility>
+
 #include "GUI/window.h"
 
 #include "spdlog/spdlog.h"
@@ -17,18 +20,72 @@
 RUZINO_NAMESPACE_OPEN_SCOPE
 
 // WindowEventSystem implementation
-void WindowEventSystem::subscribe(
+WindowEventSystem::SubscriptionId WindowEventSystem::subscribe(
     const std::string& event_name,
     EventCallback callback)
 {
-    subscribers_[event_name].push_back(callback);
+    const SubscriptionId id = next_subscription_id_++;
+    subscribers_[event_name].push_back(
+        Subscriber { id, std::move(callback) });
+    return id;
 }
 
-void WindowEventSystem::subscribe_any(
+WindowEventSystem::SubscriptionId WindowEventSystem::subscribe_any(
     const std::string& event_name,
     EventCallbackAny callback)
 {
-    subscribers_any_[event_name].push_back(callback);
+    const SubscriptionId id = next_subscription_id_++;
+    subscribers_any_[event_name].push_back(
+        SubscriberAny { id, std::move(callback) });
+    return id;
+}
+
+void WindowEventSystem::unsubscribe(
+    const std::string& event_name,
+    SubscriptionId subscription_id)
+{
+    auto it = subscribers_.find(event_name);
+    if (it == subscribers_.end()) {
+        return;
+    }
+
+    auto& callbacks = it->second;
+    callbacks.erase(
+        std::remove_if(
+            callbacks.begin(),
+            callbacks.end(),
+            [subscription_id](const Subscriber& subscriber) {
+                return subscriber.id == subscription_id;
+            }),
+        callbacks.end());
+
+    if (callbacks.empty()) {
+        subscribers_.erase(it);
+    }
+}
+
+void WindowEventSystem::unsubscribe_any(
+    const std::string& event_name,
+    SubscriptionId subscription_id)
+{
+    auto it = subscribers_any_.find(event_name);
+    if (it == subscribers_any_.end()) {
+        return;
+    }
+
+    auto& callbacks = it->second;
+    callbacks.erase(
+        std::remove_if(
+            callbacks.begin(),
+            callbacks.end(),
+            [subscription_id](const SubscriberAny& subscriber) {
+                return subscriber.id == subscription_id;
+            }),
+        callbacks.end());
+
+    if (callbacks.empty()) {
+        subscribers_any_.erase(it);
+    }
 }
 
 void WindowEventSystem::emit(
@@ -37,8 +94,11 @@ void WindowEventSystem::emit(
 {
     auto it = subscribers_.find(event_name);
     if (it != subscribers_.end()) {
-        for (auto& callback : it->second) {
-            callback(event_data);
+        auto callbacks = it->second;
+        for (const auto& subscriber : callbacks) {
+            if (subscriber.callback) {
+                subscriber.callback(event_data);
+            }
         }
     }
 }
@@ -49,8 +109,11 @@ void WindowEventSystem::emit_any(
 {
     auto it = subscribers_any_.find(event_name);
     if (it != subscribers_any_.end()) {
-        for (auto& callback : it->second) {
-            callback(event_data);
+        auto callbacks = it->second;
+        for (const auto& subscriber : callbacks) {
+            if (subscriber.callback) {
+                subscriber.callback(event_data);
+            }
         }
     }
 }
