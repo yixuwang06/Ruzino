@@ -370,6 +370,7 @@ Color Hd_RUZINO_Rect_Light::Sample(
     return irradiance / M_PI;
 }
 
+// HW7_TODO: implement the intersect function for rectangle light, you can refer to the sphere light, but you need to consider the fact that rectangle light is not a point light source.
 Color Hd_RUZINO_Rect_Light::Intersect(const GfRay& ray, float& depth)
 {
     depth = std::numeric_limits<float>::infinity();
