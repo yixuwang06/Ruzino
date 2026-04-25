@@ -20,6 +20,7 @@ struct HD_RUZINO_API RenderGlobalPayload {
     RenderGlobalPayload(
         std::vector<Hd_RUZINO_Camera*>* cameras,
         std::vector<Hd_RUZINO_Light*>* lights,
+        std::vector<Hd_RUZINO_Mesh*>* meshes,
         pxr::TfHashMap<pxr::SdfPath, Hd_RUZINO_Material*, pxr::TfHash>*
             materials,
         nvrhi::IDevice* nvrhi_device);
@@ -30,6 +31,7 @@ struct HD_RUZINO_API RenderGlobalPayload {
     {
         cameras = rhs.cameras;
         lights = rhs.lights;
+        meshes = rhs.meshes;
         materials = rhs.materials;
         nvrhi_device = rhs.nvrhi_device;
         shader_factory = ShaderFactory(&resource_allocator);
@@ -89,6 +91,11 @@ struct HD_RUZINO_API RenderGlobalPayload {
         return *lights;
     }
 
+    auto& get_meshes() const
+    {
+        return *meshes;
+    }
+
     auto& get_materials() const
     {
         return *materials;
@@ -99,6 +106,7 @@ struct HD_RUZINO_API RenderGlobalPayload {
    private:
     std::vector<Hd_RUZINO_Camera*>* cameras;
     std::vector<Hd_RUZINO_Light*>* lights;
+    std::vector<Hd_RUZINO_Mesh*>* meshes;
     pxr::TfHashMap<pxr::SdfPath, Hd_RUZINO_Material*, pxr::TfHash>* materials;
 };
 

@@ -101,7 +101,56 @@ inline UsdGeomCamera GetCamera(
 inline void CreateGLContext()
 {
 #ifdef _WIN32
-    HDC hdc = GetDC(GetConsoleWindow());
+    static HWND s_hwnd = nullptr;
+    static HDC s_hdc = nullptr;
+    static HGLRC s_hglrc = nullptr;
+    static bool s_class_registered = false;
+    static const wchar_t* s_class_name = L"RuzinoHeadlessHiddenGLContext";
+
+    if (s_hglrc && s_hdc) {
+        wglMakeCurrent(s_hdc, s_hglrc);
+        return;
+    }
+
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    if (!s_class_registered) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = DefWindowProcW;
+        wc.hInstance = instance;
+        wc.lpszClassName = s_class_name;
+        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            spdlog::error("Headless GL: failed to register hidden window class");
+            return;
+        }
+        s_class_registered = true;
+    }
+
+    s_hwnd = CreateWindowExW(
+        0,
+        s_class_name,
+        L"Ruzino Headless GL Context",
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        1,
+        1,
+        nullptr,
+        nullptr,
+        instance,
+        nullptr);
+    if (!s_hwnd) {
+        spdlog::error("Headless GL: failed to create hidden GL window");
+        return;
+    }
+
+    s_hdc = GetDC(s_hwnd);
+    if (!s_hdc) {
+        spdlog::error("Headless GL: failed to get hidden GL window DC");
+        DestroyWindow(s_hwnd);
+        s_hwnd = nullptr;
+        return;
+    }
+
     PIXELFORMATDESCRIPTOR pfd = {};
     pfd.nSize = sizeof(pfd);
     pfd.nVersion = 1;
@@ -109,11 +158,31 @@ inline void CreateGLContext()
     pfd.iPixelType = PFD_TYPE_RGBA;
     pfd.cColorBits = 24;
 
-    int pixelFormat = ChoosePixelFormat(hdc, &pfd);
-    SetPixelFormat(hdc, pixelFormat, &pfd);
+    int pixelFormat = ChoosePixelFormat(s_hdc, &pfd);
+    if (pixelFormat == 0 || !SetPixelFormat(s_hdc, pixelFormat, &pfd)) {
+        spdlog::error("Headless GL: failed to set hidden GL pixel format");
+        ReleaseDC(s_hwnd, s_hdc);
+        DestroyWindow(s_hwnd);
+        s_hdc = nullptr;
+        s_hwnd = nullptr;
+        return;
+    }
 
-    HGLRC hglrc = wglCreateContext(hdc);
-    wglMakeCurrent(hdc, hglrc);
+    s_hglrc = wglCreateContext(s_hdc);
+    if (!s_hglrc || !wglMakeCurrent(s_hdc, s_hglrc)) {
+        spdlog::error("Headless GL: failed to create/make current WGL context");
+        if (s_hglrc) {
+            wglDeleteContext(s_hglrc);
+        }
+        ReleaseDC(s_hwnd, s_hdc);
+        DestroyWindow(s_hwnd);
+        s_hglrc = nullptr;
+        s_hdc = nullptr;
+        s_hwnd = nullptr;
+        return;
+    }
+
+    spdlog::info("Headless GL: hidden WGL context created");
 #endif
 }
 
@@ -212,9 +281,9 @@ inline size_t GetBytesPerPixel(HgiFormat format)
 
         default:
             spdlog::warn(
-                "Unknown HgiFormat: {}, defaulting to 16 bytes per pixel",
+                "Unknown or unsupported HgiFormat: {}",
                 static_cast<int>(format));
-            return 16;  // Default to Float32Vec4
+            return 0;
     }
 }
 
@@ -252,6 +321,27 @@ inline bool SaveImageToFile(
     }
 
     std::string ext = GetFileExtension(filename);
+    const size_t bytes_per_pixel = GetBytesPerPixel(source_format);
+    const size_t required_input_size =
+        static_cast<size_t>(width) * static_cast<size_t>(height) * bytes_per_pixel;
+
+    if (bytes_per_pixel == 0) {
+        spdlog::error(
+            "Cannot save image {} because source format {} is unsupported",
+            filename,
+            static_cast<int>(source_format));
+        return false;
+    }
+
+    if (data.size() < required_input_size) {
+        spdlog::error(
+            "Cannot save image {} because input buffer is too small: have {}, need {} bytes for format {}",
+            filename,
+            data.size(),
+            required_input_size,
+            static_cast<int>(source_format));
+        return false;
+    }
 
     // Convert source data to float RGBA based on format
     std::vector<float> rgba_float(width * height * 4);
@@ -302,12 +392,11 @@ inline bool SaveImageToFile(
         }
     }
     else {
-        spdlog::warn(
-            "Unsupported source format: {}, assuming Float32Vec4",
+        spdlog::error(
+            "Cannot save image {} because source format {} is not implemented",
+            filename,
             static_cast<int>(source_format));
-        const float* float_data = reinterpret_cast<const float*>(src_data);
-        std::copy(
-            float_data, float_data + width * height * 4, rgba_float.begin());
+        return false;
     }
 
     // Check if it's a HDR/EXR format
@@ -379,27 +468,48 @@ inline bool SaveImageToFile(
 }
 
 // Texture reading methods
-inline bool ReadTextureDirectly(
-    UsdImagingGLEngine* renderer,
+inline bool ReadTextureHandleDirectly(
+    const nvrhi::TextureHandle& rendered,
     int width,
     int height,
-    std::vector<uint8_t>& texture_data)
+    std::vector<uint8_t>& texture_data,
+    nvrhi::Format* out_format = nullptr)
 {
-    auto hacked_handle =
-        renderer->GetRendererSetting(pxr::TfToken("VulkanColorAov"));
-    if (!hacked_handle.IsHolding<const void*>()) {
+    auto texture = rendered.Get();
+    if (!texture) {
+        spdlog::warn("Direct texture readback received a null texture handle");
         return false;
     }
 
-    spdlog::info("Using direct texture copy method...");
+    const auto& texture_desc = texture->getDesc();
+    if (out_format) {
+        *out_format = texture_desc.format;
+    }
 
-    auto bare_pointer = hacked_handle.Get<const void*>();
-    auto texture =
-        *static_cast<nvrhi::ITexture**>(const_cast<void*>(bare_pointer));
+    const auto& format_info = nvrhi::getFormatInfo(texture_desc.format);
+    if (format_info.bytesPerBlock == 0 || format_info.blockSize != 1) {
+        spdlog::error(
+            "Unsupported direct readback format {} (bytesPerBlock={}, blockSize={})",
+            static_cast<int>(texture_desc.format),
+            format_info.bytesPerBlock,
+            format_info.blockSize);
+        return false;
+    }
 
-    texture_data.resize(width * height * 4 * sizeof(float));
+    const size_t bytes_per_pixel = format_info.bytesPerBlock;
+    const size_t row_size = static_cast<size_t>(width) * bytes_per_pixel;
+    const size_t buffer_size = static_cast<size_t>(height) * row_size;
 
-    // Create staging texture once and reuse command list
+    spdlog::info(
+        "Direct readback format: nvrhi={}, bytes per pixel: {}, row size: {}, "
+        "buffer size: {}",
+        static_cast<int>(texture_desc.format),
+        bytes_per_pixel,
+        row_size,
+        buffer_size);
+
+    texture_data.resize(buffer_size);
+
     static nvrhi::StagingTextureHandle staging_texture;
     static nvrhi::CommandListHandle command_list;
 
@@ -408,38 +518,48 @@ inline bool ReadTextureDirectly(
     }
 
     if (!staging_texture || staging_texture->getDesc().width != width ||
-        staging_texture->getDesc().height != height) {
+        staging_texture->getDesc().height != height ||
+        staging_texture->getDesc().format != texture_desc.format) {
         nvrhi::TextureDesc staging_desc;
         staging_desc.debugName = "headless_staging";
         staging_desc.width = width;
         staging_desc.height = height;
-        staging_desc.format = texture->getDesc().format;
+        staging_desc.format = texture_desc.format;
         staging_desc.initialState = nvrhi::ResourceStates::CopyDest;
 
         staging_texture = Ruzino::RHI::get_device()->createStagingTexture(
             staging_desc, nvrhi::CpuAccessMode::Read);
     }
 
-    // Single command list operation
     command_list->open();
     command_list->copyTexture(staging_texture, {}, texture, {});
     command_list->close();
     Ruzino::RHI::get_device()->executeCommandList(command_list.Get());
     Ruzino::RHI::get_device()->waitForIdle();
 
-    // Direct memory copy without row-by-row iteration
-    size_t pitch;
+    size_t pitch = 0;
     auto mapped = Ruzino::RHI::get_device()->mapStagingTexture(
         staging_texture, {}, nvrhi::CpuAccessMode::Read, &pitch);
+    if (!mapped) {
+        spdlog::error("Failed to map staging texture for direct readback");
+        return false;
+    }
 
-    size_t row_size = width * 4 * sizeof(float);
+    if (pitch < row_size) {
+        spdlog::error(
+            "Mapped staging texture pitch {} is smaller than required row size "
+            "{}",
+            pitch,
+            row_size);
+        Ruzino::RHI::get_device()->unmapStagingTexture(staging_texture);
+        return false;
+    }
+
     if (pitch == row_size) {
-        // Contiguous memory - single memcpy
-        memcpy(texture_data.data(), mapped, height * row_size);
+        memcpy(texture_data.data(), mapped, buffer_size);
     }
     else {
-        // Non-contiguous - batch copy rows
-        auto src_ptr = static_cast<uint8_t*>(mapped);
+        auto src_ptr = static_cast<const uint8_t*>(mapped);
         auto dst_ptr = texture_data.data();
         for (int i = 0; i < height; ++i) {
             memcpy(dst_ptr, src_ptr, row_size);
@@ -451,6 +571,26 @@ inline bool ReadTextureDirectly(
     Ruzino::RHI::get_device()->unmapStagingTexture(staging_texture);
     spdlog::info("Direct texture copy completed successfully");
     return true;
+}
+
+inline bool ReadTextureDirectly(
+    UsdImagingGLEngine* renderer,
+    int width,
+    int height,
+    std::vector<uint8_t>& texture_data)
+{
+    auto hacked_handle =
+        renderer->GetRendererSetting(pxr::TfToken("VulkanColorAov"));
+    if (!hacked_handle.IsHolding<const void*>()) {
+        spdlog::warn("Renderer setting VulkanColorAov is unavailable");
+        return false;
+    }
+
+    spdlog::info("Using direct texture copy method...");
+
+    auto bare_pointer = hacked_handle.Get<const void*>();
+    auto rendered = *reinterpret_cast<const nvrhi::TextureHandle*>(bare_pointer);
+    return ReadTextureHandleDirectly(rendered, width, height, texture_data);
 }
 
 inline bool ReadTextureCPU(

@@ -40,6 +40,9 @@
 RUZINO_NAMESPACE_OPEN_SCOPE
 class Hd_RUZINO_RenderParam;
 using namespace pxr;
+namespace {
+std::mutex g_runtime_mesh_sync_mutex;
+}
 Hd_RUZINO_Mesh::Hd_RUZINO_Mesh(const SdfPath& id)
     : HdMesh(id),
       _cullStyle(HdCullStyleDontCare),
@@ -53,6 +56,87 @@ Hd_RUZINO_Mesh::Hd_RUZINO_Mesh(const SdfPath& id)
 
 Hd_RUZINO_Mesh::~Hd_RUZINO_Mesh()
 {
+}
+
+void Hd_RUZINO_Mesh::upload_gpu_data(Hd_RUZINO_RenderParam* render_param)
+{
+    if (mesh_desc_dirty && mesh_desc_buffer) {
+        spdlog::info("Mesh {}: uploading mesh descriptor", GetId().GetText());
+        mesh_desc_buffer->write_data(&cached_mesh_desc);
+        mesh_desc_dirty = false;
+        spdlog::info("Mesh {}: mesh descriptor uploaded", GetId().GetText());
+    }
+    if (pending_single_instance_upload) {
+        spdlog::info(
+            "Mesh {}: preparing deferred single-instance buffers",
+            GetId().GetText());
+
+        if (!rt_instanceBuffer ||
+            rt_instanceBuffer->count() != pending_single_instance_count) {
+            rt_instanceBuffer = render_param->InstanceCollection->rt_instance_pool
+                                   .allocate(pending_single_instance_count);
+        }
+        if (!instanceBuffer ||
+            instanceBuffer->count() != pending_single_instance_count) {
+            instanceBuffer = render_param->InstanceCollection->instance_pool
+                                 .allocate(pending_single_instance_count);
+        }
+        if (!draw_indirect || draw_indirect->count() != 1) {
+            draw_indirect =
+                render_param->InstanceCollection->draw_indirect_pool.allocate(1);
+        }
+
+        cached_instance_data.geometryID = mesh_desc_buffer->index();
+        cached_instance_data.materialID = pending_material_location;
+        memcpy(
+            &cached_instance_data.transform,
+            transform.data(),
+            sizeof(pxr::GfMatrix4f));
+        cached_instance_data.flags = 0;
+
+        cached_rt_instance.blasDeviceAddress = BLAS->getDeviceAddress();
+        cached_rt_instance.instanceMask = 1;
+        cached_rt_instance.flags = nvrhi::rt::InstanceFlags::None;
+        GfMatrix4f mat_transposed = transform.GetTranspose();
+        memcpy(
+            cached_rt_instance.transform,
+            mat_transposed.data(),
+            sizeof(nvrhi::rt::AffineTransform));
+        cached_rt_instance.instanceID = instanceBuffer->index();
+
+        cached_draw_indirect.vertexCount = triangulatedIndices.size() * 3;
+        cached_draw_indirect.instanceCount = pending_single_instance_count;
+        cached_draw_indirect.startVertexLocation = 0;
+        cached_draw_indirect.startInstanceLocation = instanceBuffer->index();
+
+        instance_data_dirty = true;
+        rt_instance_dirty = true;
+        draw_indirect_dirty = true;
+        pending_single_instance_upload = false;
+
+        spdlog::info(
+            "Mesh {}: deferred single-instance buffers prepared",
+            GetId().GetText());
+    }
+
+    if (instance_data_dirty && instanceBuffer) {
+        spdlog::info("Mesh {}: uploading instance buffer", GetId().GetText());
+        instanceBuffer->write_data(&cached_instance_data);
+        instance_data_dirty = false;
+        spdlog::info("Mesh {}: instance buffer uploaded", GetId().GetText());
+    }
+    if (rt_instance_dirty && rt_instanceBuffer) {
+        spdlog::info("Mesh {}: uploading RT instance buffer", GetId().GetText());
+        rt_instanceBuffer->write_data(&cached_rt_instance);
+        rt_instance_dirty = false;
+        spdlog::info("Mesh {}: RT instance buffer uploaded", GetId().GetText());
+    }
+    if (draw_indirect_dirty && draw_indirect) {
+        spdlog::info("Mesh {}: uploading draw indirect args", GetId().GetText());
+        draw_indirect->write_data(&cached_draw_indirect);
+        draw_indirect_dirty = false;
+        spdlog::info("Mesh {}: draw indirect args uploaded", GetId().GetText());
+    }
 }
 
 HdDirtyBits Hd_RUZINO_Mesh::GetInitialDirtyBitsMask() const
@@ -146,6 +230,13 @@ void Hd_RUZINO_Mesh::_UpdatePrimvarSources(
 
 void Hd_RUZINO_Mesh::create_gpu_resources(Hd_RUZINO_RenderParam* render_param)
 {
+    spdlog::info(
+        "Mesh {}: create_gpu_resources begin (points={}, triangles={}, normals={}, tangents={})",
+        GetId().GetText(),
+        points.size(),
+        triangulatedIndices.size(),
+        normals.size(),
+        tangents.size());
     auto device = RHI::get_device();
 
     if (!copy_commandlist)
@@ -280,6 +371,9 @@ void Hd_RUZINO_Mesh::create_gpu_resources(Hd_RUZINO_RenderParam* render_param)
 
     {
         std::lock_guard lock(execution_launch_mutex);
+        spdlog::info(
+            "Mesh {}: submitting vertex/index upload command list",
+            GetId().GetText());
         device->executeCommandList(copy_commandlist);
 
         nvrhi::rt::AccelStructDesc blas_desc;
@@ -304,11 +398,16 @@ void Hd_RUZINO_Mesh::create_gpu_resources(Hd_RUZINO_RenderParam* render_param)
         nvrhi::utils::BuildBottomLevelAccelStruct(
             copy_commandlist, BLAS, blas_desc);
         copy_commandlist->close();
+        spdlog::info("Mesh {}: submitting BLAS build command list", GetId().GetText());
         device->executeCommandList(copy_commandlist);
         device->waitForIdle();
 
         descriptor_handle = descriptor_table->CreateDescriptorHandle(
             nvrhi::BindingSetItem::RawBuffer_SRV(0, vertexBuffer.Get()));
+        spdlog::info(
+            "Mesh {}: BLAS build submitted, descriptor handle={}",
+            GetId().GetText(),
+            descriptor_handle.Get());
     }
 
     MeshDesc mesh_desc;
@@ -329,8 +428,17 @@ void Hd_RUZINO_Mesh::create_gpu_resources(Hd_RUZINO_RenderParam* render_param)
                                          ? InterpolationType::Vertex
                                          : InterpolationType::FaceVarying;
 
+    spdlog::info(
+        "Mesh {}: allocating mesh descriptor buffer handle",
+        GetId().GetText());
     mesh_desc_buffer = render_param->InstanceCollection->mesh_pool.allocate(1);
-    mesh_desc_buffer->write_data(&mesh_desc);
+    spdlog::info(
+        "Mesh {}: mesh descriptor buffer handle allocated index={}",
+        GetId().GetText(),
+        mesh_desc_buffer->index());
+    cached_mesh_desc = mesh_desc;
+    mesh_desc_dirty = true;
+    spdlog::info("Mesh {}: create_gpu_resources end", GetId().GetText());
 }
 
 void Hd_RUZINO_Mesh::updateTLAS(
@@ -338,6 +446,7 @@ void Hd_RUZINO_Mesh::updateTLAS(
     HdSceneDelegate* sceneDelegate,
     HdDirtyBits* dirtyBits)
 {
+    spdlog::info("Mesh {}: updateTLAS begin", GetId().GetText());
     _UpdateInstancer(sceneDelegate, dirtyBits);
     const SdfPath& id = GetId();
 
@@ -396,18 +505,19 @@ void Hd_RUZINO_Mesh::updateTLAS(
             "Mesh {} has no instancer, using single instance", id.GetText());
     }
 
-    auto& rt_instance_pool = render_param->InstanceCollection->rt_instance_pool;
-
-    if (!rt_instanceBuffer || rt_instanceBuffer->count() != instance_count)
-        rt_instanceBuffer = rt_instance_pool.allocate(instance_count);
-    if (!instanceBuffer || instanceBuffer->count() != instance_count)
-        instanceBuffer =
-            render_param->InstanceCollection->instance_pool.allocate(
-                instance_count);
-
-    material->ensure_material_data_handle(render_param);
+    if (material) {
+        material->ensure_material_data_handle(render_param);
+    }
 
     if (!GetInstancerId().IsEmpty()) {
+        auto& rt_instance_pool = render_param->InstanceCollection->rt_instance_pool;
+        if (!rt_instanceBuffer || rt_instanceBuffer->count() != instance_count)
+            rt_instanceBuffer = rt_instance_pool.allocate(instance_count);
+        if (!instanceBuffer || instanceBuffer->count() != instance_count)
+            instanceBuffer =
+                render_param->InstanceCollection->instance_pool.allocate(
+                    instance_count);
+
         // GPU path: Let instancer compute transforms on GPU
         HdRenderIndex& renderIndex = sceneDelegate->GetRenderIndex();
         HdInstancer* instancer = renderIndex.GetInstancer(GetInstancerId());
@@ -421,46 +531,29 @@ void Hd_RUZINO_Mesh::updateTLAS(
             mesh_desc_buffer->index());
     }
     else {
-        // CPU path: Single instance, no instancer
-        GeometryInstanceData instance_data;
-        instance_data.geometryID = mesh_desc_buffer->index();
-        instance_data.materialID =
-            material ? material->GetMaterialLocation() : -1;
-        memcpy(
-            &instance_data.transform,
-            transform.data(),
-            sizeof(pxr::GfMatrix4f));
-        instance_data.flags = 0;
-
-        instanceBuffer->write_data(&instance_data);
-
-        nvrhi::rt::InstanceDesc rt_instance;
-        rt_instance.blasDeviceAddress = BLAS->getDeviceAddress();
-        rt_instance.instanceMask = 1;
-        rt_instance.flags = nvrhi::rt::InstanceFlags::None;
-
-        GfMatrix4f mat_transposed = transform.GetTranspose();
-        memcpy(
-            rt_instance.transform,
-            mat_transposed.data(),
-            sizeof(nvrhi::rt::AffineTransform));
-        rt_instance.instanceID = instanceBuffer->index();
-
-        rt_instanceBuffer->write_data(&rt_instance);
+        pending_single_instance_count = instance_count;
+        pending_material_location =
+            material ? static_cast<int>(material->GetMaterialLocation()) : -1;
+        pending_single_instance_upload = true;
     }
 
     render_param->InstanceCollection->set_require_rebuild_tlas();
+    spdlog::info("Mesh {}: TLAS marked dirty", GetId().GetText());
 
-    draw_indirect =
-        render_param->InstanceCollection->draw_indirect_pool.allocate(1);
-    nvrhi::DrawIndirectArguments args;
+    if (!GetInstancerId().IsEmpty()) {
+        draw_indirect =
+            render_param->InstanceCollection->draw_indirect_pool.allocate(1);
+        nvrhi::DrawIndirectArguments args;
 
-    args.vertexCount = triangulatedIndices.size() * 3;
-    args.instanceCount = instance_count;
-    args.startVertexLocation = 0;
-    args.startInstanceLocation = instanceBuffer->index();
+        args.vertexCount = triangulatedIndices.size() * 3;
+        args.instanceCount = instance_count;
+        args.startVertexLocation = 0;
+        args.startInstanceLocation = instanceBuffer->index();
 
-    draw_indirect->write_data(&args);
+        cached_draw_indirect = args;
+        draw_indirect_dirty = true;
+    }
+    spdlog::info("Mesh {}: updateTLAS end", GetId().GetText());
 }
 
 void Hd_RUZINO_Mesh::_InitRepr(const TfToken& reprToken, HdDirtyBits* dirtyBits)
@@ -483,7 +576,9 @@ void Hd_RUZINO_Mesh::Sync(
     HdDirtyBits* dirtyBits,
     const TfToken& reprToken)
 {
+    std::lock_guard<std::mutex> mesh_sync_lock(g_runtime_mesh_sync_mutex);
     _dirtyBits = *dirtyBits;
+    bool had_scene_dirty = (*dirtyBits != HdChangeTracker::Clean);
     HD_TRACE_FUNCTION();
     HF_MALLOC_TAG_FUNCTION();
 
@@ -1124,8 +1219,10 @@ void Hd_RUZINO_Mesh::Sync(
 
         *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
     }
-    static_cast<Hd_RUZINO_RenderParam*>(renderParam)
-        ->InstanceCollection->mark_geometry_dirty();
+    if (had_scene_dirty) {
+        static_cast<Hd_RUZINO_RenderParam*>(renderParam)
+            ->InstanceCollection->mark_geometry_dirty();
+    }
 }
 
 void Hd_RUZINO_Mesh::Finalize(HdRenderParam* renderParam)

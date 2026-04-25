@@ -199,6 +199,11 @@ HdAovDescriptor Hd_RUZINO_RenderDelegate::GetDefaultAovDescriptor(
 
 Hd_RUZINO_RenderDelegate::~Hd_RUZINO_RenderDelegate()
 {
+    if (_renderThread.IsThreadRunning()) {
+        _renderThread.StopRender();
+        _renderThread.StopThread();
+    }
+
     _resourceRegistry.reset();
     std::cout << "Destroying Tiny RenderDelegate" << std::endl;
 }

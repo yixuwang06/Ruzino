@@ -8,6 +8,8 @@ struct GammaCorrectionStorage {
     constexpr static bool has_storage = false;
 
     pxr::GfVec2i image_size = pxr::GfVec2i(-1, -1);
+    nvrhi::TextureHandle cached_input_texture;
+    nvrhi::TextureHandle corrected_texture;
 
     // Cached resources
     ProgramHandle cached_program;
@@ -66,17 +68,25 @@ NODE_EXECUTION_FUNCTION(gamma_correction)
         CHECK_PROGRAM_ERROR(storage.cached_program);
     }
 
-    // Create output texture
     auto desc = texture->getDesc();
-    auto corrected_texture = resource_allocator.create(desc);
+    bool texture_changed = (storage.cached_input_texture != texture);
+    bool output_changed =
+        !storage.corrected_texture || storage.corrected_texture->getDesc() != desc;
+    if (output_changed) {
+        if (storage.corrected_texture) {
+            resource_allocator.destroy(storage.corrected_texture);
+        }
+        storage.corrected_texture = resource_allocator.create(desc);
+    }
 
-    bool any_change = size_changed || params_changed;
+    bool any_change = size_changed || params_changed || texture_changed || output_changed;
 
     // Rebuild cached resources only when necessary
     if (any_change || !storage.cached_program_vars ||
         !storage.cached_compute_context) {
         // Update cached parameters
         storage.cached_gamma = gamma;
+        storage.cached_input_texture = texture;
 
         // Create program vars
         storage.cached_program_vars = std::make_unique<ProgramVars>(
@@ -84,7 +94,7 @@ NODE_EXECUTION_FUNCTION(gamma_correction)
 
         ProgramVars& program_vars = *storage.cached_program_vars;
         program_vars["InputTexture"] = texture;
-        program_vars["OutputTexture"] = corrected_texture;
+        program_vars["OutputTexture"] = storage.corrected_texture;
 
         auto gamma_cb = create_constant_buffer(params, gamma);
         MARK_DESTROY_NVRHI_RESOURCE(gamma_cb);
@@ -108,7 +118,7 @@ NODE_EXECUTION_FUNCTION(gamma_correction)
         {}, *storage.cached_program_vars, image_size[0], 32, image_size[1], 32);
     storage.cached_compute_context->finish();
 
-    params.set_output("Corrected", corrected_texture);
+    params.set_output("Corrected", storage.corrected_texture);
     return true;
 }
 

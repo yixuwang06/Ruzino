@@ -124,10 +124,13 @@ void Hd_RUZINO_Light::Sync(
             auto diffuse =
                 sceneDelegate->GetLightParamValue(id, HdLightTokens->diffuse)
                     .Get<float>();
+            auto intensity =
+                sceneDelegate->GetLightParamValue(id, HdLightTokens->intensity)
+                    .GetWithDefault<float>();
             auto color =
                 sceneDelegate->GetLightParamValue(id, HdLightTokens->color)
                     .Get<GfVec3f>() *
-                diffuse;
+                diffuse * intensity;
             light.SetDiffuse(GfVec4f(color[0], color[1], color[2], 0));
             light.SetPosition(pos);
             _params[HdLightTokens->params] = VtValue(light);

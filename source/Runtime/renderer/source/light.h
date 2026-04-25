@@ -2,6 +2,7 @@
 #include "DescriptorTableManager.h"
 #include "api.h"
 #include "internal/memory/DeviceMemoryPool.hpp"
+#include "../nodes/shaders/shaders/Scene/Lights/LightData.slang"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/imaging/garch/glApi.h"
 #include "pxr/imaging/hd/light.h"
@@ -13,8 +14,6 @@
 RUZINO_NAMESPACE_OPEN_SCOPE
 
 using namespace pxr;
-// Forward declarations
-struct LightData;
 // Base light class
 class HD_RUZINO_API Hd_RUZINO_Light : public HdLight {
    public:
@@ -45,6 +44,8 @@ class HD_RUZINO_API Hd_RUZINO_Light : public HdLight {
         return light_buffer;
     }
 
+    virtual void upload_light_data();
+
     void Finalize(HdRenderParam* renderParam) override;
 
    protected:
@@ -54,6 +55,8 @@ class HD_RUZINO_API Hd_RUZINO_Light : public HdLight {
     TfHashMap<TfToken, VtValue, TfToken::HashFunctor> _params;
     // GPU buffer for light data
     typename DeviceMemoryPool<LightData>::MemoryHandle light_buffer;
+    LightData cached_light_data = {};
+    bool light_data_dirty = false;
 };
 
 // Simple light (directional, point light)

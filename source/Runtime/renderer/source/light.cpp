@@ -32,9 +32,6 @@ void Hd_RUZINO_Light::Sync(
         return;
     }
 
-    auto render_param = static_cast<Hd_RUZINO_RenderParam*>(renderParam);
-    render_param->InstanceCollection->mark_lights_dirty();
-
     const SdfPath& id = GetId();
 
     // HdStLight communicates to the scene graph and caches all interesting
@@ -44,6 +41,11 @@ void Hd_RUZINO_Light::Sync(
 
     // Change tracking
     HdDirtyBits bits = *dirtyBits;
+    auto render_param = static_cast<Hd_RUZINO_RenderParam*>(renderParam);
+    if (bits & (DirtyTransform | DirtyParams | DirtyShadowParams |
+                DirtyCollection)) {
+        render_param->InstanceCollection->mark_lights_dirty();
+    }
 
     // Transform
     if (bits & DirtyTransform) {
@@ -198,6 +200,17 @@ VtValue Hd_RUZINO_Light::Get(const TfToken& token) const
     TfMapLookup(_params, token, &val);
     return val;
 }
+
+void Hd_RUZINO_Light::upload_light_data()
+{
+    if (light_data_dirty && light_buffer) {
+        spdlog::info("Light {}: uploading light data", GetId().GetText());
+        light_buffer->write_data(&cached_light_data);
+        light_data_dirty = false;
+        spdlog::info("Light {}: light data uploaded", GetId().GetText());
+    }
+}
+
 void Hd_RUZINO_Light::Finalize(HdRenderParam* renderParam)
 {
     auto render_param = static_cast<Hd_RUZINO_RenderParam*>(renderParam);
@@ -260,7 +273,8 @@ void Hd_RUZINO_Simple_Light::Sync(
             intensity,
             exposure);
 
-        this->light_buffer->write_data(&lightData);
+        cached_light_data = lightData;
+        light_data_dirty = true;
     }
 
     // Clear dirty bits
@@ -322,7 +336,8 @@ void Hd_RUZINO_Distant_Light::Sync(
         lightData.intensity =
             float3(color[0], color[1], color[2]) * diffuse * finalIntensity;
 
-        this->light_buffer->write_data(&lightData);
+        cached_light_data = lightData;
+        light_data_dirty = true;
     }
 
     // Clear dirty bits
@@ -386,7 +401,8 @@ void Hd_RUZINO_Sphere_Light::Sync(
         // Compute surface area for future use in importance sampling
         lightData.surfaceArea = 4.0f * 3.14159265359f * _radius * _radius;
 
-        this->light_buffer->write_data(&lightData);
+        cached_light_data = lightData;
+        light_data_dirty = true;
     }
 
     // Clear dirty bits
@@ -508,7 +524,8 @@ void Hd_RUZINO_Rect_Light::Sync(
             }
         }
 
-        this->light_buffer->write_data(&lightData);
+        cached_light_data = lightData;
+        light_data_dirty = true;
     }
 
     // Clear dirty bits
@@ -605,7 +622,8 @@ void Hd_RUZINO_Disk_Light::Sync(
         // Disk area
         lightData.surfaceArea = 3.14159265359f * _radius * _radius;
 
-        this->light_buffer->write_data(&lightData);
+        cached_light_data = lightData;
+        light_data_dirty = true;
     }
 
     // Clear dirty bits
@@ -676,7 +694,8 @@ void Hd_RUZINO_Cylinder_Light::Sync(
         // Cylinder surface area (without caps)
         lightData.surfaceArea = 2.0f * 3.14159265359f * _radius * _length;
 
-        this->light_buffer->write_data(&lightData);
+        cached_light_data = lightData;
+        light_data_dirty = true;
     }
 
     // Clear dirty bits
@@ -926,7 +945,8 @@ void Hd_RUZINO_Dome_Light::Sync(
                 radiance[2]);
         }
 
-        this->light_buffer->write_data(&lightData);
+        cached_light_data = lightData;
+        light_data_dirty = true;
     }
 
     // Clear dirty bits

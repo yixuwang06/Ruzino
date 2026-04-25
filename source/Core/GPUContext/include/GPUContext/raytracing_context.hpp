@@ -42,6 +42,21 @@ class GPUCONTEXT_API RaytracingContext : public GPUContext {
         unsigned position = 0,
         ProgramVarHandle handle = nullptr);
 
+    void set_max_recursion_depth(uint32_t depth)
+    {
+        max_recursion_depth_ = depth;
+    }
+
+    void set_max_payload_size(uint32_t size)
+    {
+        max_payload_size_ = size;
+    }
+
+    void set_max_attribute_size(uint32_t size)
+    {
+        max_attribute_size_ = size;
+    }
+
     void finish_announcing_shader_names();
 
    private:
@@ -69,6 +84,9 @@ class GPUCONTEXT_API RaytracingContext : public GPUContext {
     IProgram* program;
     nvrhi::rt::ShaderTableHandle sbt;
     nvrhi::rt::PipelineHandle raytracing_pipeline;
+    uint32_t max_recursion_depth_ = 31;
+    uint32_t max_payload_size_ = 64 * sizeof(float);
+    uint32_t max_attribute_size_ = 4 * sizeof(float);
 };
 
 RUZINO_NAMESPACE_CLOSE_SCOPE

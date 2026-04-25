@@ -139,12 +139,12 @@ NODE_EXECUTION_FUNCTION(shadow_mapping)
         resource_allocator.destroy(depth_texture);
     }
 
+    auto shader_error = shader_handle->shader.get_error();
+
     resource_allocator.destroy(shader_handle);
     glDeleteFramebuffers(1, &framebuffer);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    auto shader_error = shader_handle->shader.get_error();
 
     params.set_output("Shadow Maps", shadow_map_texture);
     if (!shader_error.empty()) {

@@ -2,6 +2,7 @@
 
 #include "GPUContext/program_vars.hpp"
 #include "api.h"
+#include "pxr/base/gf/vec4f.h"
 #include "pxr/imaging/hd/material.h"
 #include "pxr/imaging/hd/materialNetwork2Interface.h"
 #include "pxr/imaging/hdMtlx/hdMtlx.h"
@@ -18,6 +19,12 @@ class Shader;
 using namespace pxr;
 
 class Hio_StbImage;
+
+struct HW7PreviewMaterialData {
+    pxr::GfVec4f baseColorRoughness = pxr::GfVec4f(0.8f, 0.8f, 0.8f, 0.5f);
+    pxr::GfVec4f emissiveMetallic = pxr::GfVec4f(0.f, 0.f, 0.f, 0.f);
+};
+
 class HD_RUZINO_API Hd_RUZINO_Material : public HdMaterial {
    public:
     explicit Hd_RUZINO_Material(SdfPath const& id);
@@ -45,10 +52,14 @@ class HD_RUZINO_API Hd_RUZINO_Material : public HdMaterial {
 
     std::string GetMaterialName() const;
 
+    const HW7PreviewMaterialData& GetHW7PreviewMaterialData() const
+    {
+        return hw7_preview_material_data_;
+    }
+
     // Upload material data to GPU (override in subclasses if needed)
     virtual void upload_material_data()
-    {
-    }
+    ;
 
     virtual void update_data_loader(
         DescriptorIndex descriptor_index,
@@ -97,12 +108,15 @@ class HD_RUZINO_API Hd_RUZINO_Material : public HdMaterial {
     DeviceMemoryPool<MaterialDataBlob>::MemoryHandle material_data_handle;
     DeviceMemoryPool<MaterialHeader>::MemoryHandle material_header_handle;
     MaterialDataBlob material_data;
+    MaterialHeader material_header = {};
+    bool material_header_dirty = false;
 
     std::string slang_source_code_main;
     static std::string slang_source_code_template;
     static std::string eval_source_code_fallback;
     static std::mutex texture_mutex;
     static std::mutex material_data_handle_mutex;
+    HW7PreviewMaterialData hw7_preview_material_data_;
 
     uint32_t shader_generation = 0;  // Incremented when shader is regenerated
 
@@ -110,6 +124,11 @@ class HD_RUZINO_API Hd_RUZINO_Material : public HdMaterial {
     std::string shader_path;
     bool has_valid_shader =
         false;  // True only if shader_path points to a valid file
+
+    void set_hw7_preview_material_data(const HW7PreviewMaterialData& data)
+    {
+        hw7_preview_material_data_ = data;
+    }
 };
 
 RUZINO_NAMESPACE_CLOSE_SCOPE

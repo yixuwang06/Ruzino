@@ -367,7 +367,7 @@ Color Hd_RUZINO_Rect_Light::Sample(
     }
 
     sample_light_pdf = distance2 / (area * cosLight);
-    return irradiance / M_PI;
+    return radiance;
 }
 
 // HW7_TODO: implement the intersect function for rectangle light, you can refer to the sphere light, but you need to consider the fact that rectangle light is not a point light source.
@@ -400,7 +400,7 @@ Color Hd_RUZINO_Rect_Light::Intersect(const GfRay& ray, float& depth)
     }
 
     depth = t;
-    return irradiance / M_PI;
+    return radiance;
 }
 
 void Hd_RUZINO_Rect_Light::Sync(
@@ -442,11 +442,16 @@ void Hd_RUZINO_Rect_Light::Sync(
     auto intensity =
         sceneDelegate->GetLightParamValue(id, HdLightTokens->intensity)
             .GetWithDefault<float>();
+    auto exposure =
+        sceneDelegate->GetLightParamValue(id, HdLightTokens->exposure)
+            .GetWithDefault<float>();
+    float finalIntensity = intensity * std::pow(2.0f, exposure);
     power = sceneDelegate->GetLightParamValue(id, HdLightTokens->color)
                  .Get<GfVec3f>() *
-            diffuse * intensity;
+            diffuse * finalIntensity;
 
     irradiance = area > 1E-8f ? power / area : GfVec3f(0.0f);
+    radiance = power;
 }
 
 RUZINO_NAMESPACE_CLOSE_SCOPE

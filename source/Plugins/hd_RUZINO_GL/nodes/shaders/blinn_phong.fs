@@ -55,9 +55,21 @@ float ComputeShadowVisibility(int lightIndex, vec3 worldPos, vec3 worldNormal, v
     float closestDepth = texture(
         shadow_maps,
         vec3(shadowCoord.xy, lights[lightIndex].shadow_map_id)).x;
-    float bias = max(0.0025 * (1.0 - max(dot(worldNormal, lightDir), 0.0)), 0.0005);
+    float bias = max(0.03 * (1.0 - max(dot(worldNormal, lightDir), 0.0)), 0.006);
+    vec2 texelSize = 1.0 / vec2(textureSize(shadow_maps, 0).xy);
+    float visibility = 0.0;
 
-    return (shadowCoord.z - bias <= closestDepth) ? 1.0 : 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            vec2 sampleUV = shadowCoord.xy + vec2(x, y) * texelSize;
+            float sampledDepth = texture(
+                shadow_maps,
+                vec3(sampleUV, lights[lightIndex].shadow_map_id)).x;
+            visibility += (shadowCoord.z - bias <= sampledDepth) ? 1.0 : 0.0;
+        }
+    }
+
+    return visibility / 9.0;
 }
 
 void main() {
@@ -81,7 +93,7 @@ void main() {
     float shininess = mix(4.0, 128.0, 1.0 - roughness);
 
     vec3 viewDir = normalize(camPos - pos);
-    vec3 ambient = 0.03 * albedo;
+    vec3 ambient = 0.08 * albedo;
     vec3 result = ambient;
 
     for (int i = 0; i < light_count; i++) {
@@ -94,9 +106,8 @@ void main() {
         vec3 lightDir = lightVec / distanceToLight;
         vec3 halfDir = normalize(lightDir + viewDir);
 
-        float attenuation = 1.0 / max(
-            distanceToLight * distanceToLight,
-            max(lights[i].radius * lights[i].radius, 1E-4));
+        float attenuation = max(lights[i].radius, 1.0) /
+                            max(distanceToLight, 1.0);
 
         float diffuseFactor = max(dot(normal, lightDir), 0.0);
         float specularFactor = pow(max(dot(normal, halfDir), 0.0), shininess);
@@ -109,5 +120,6 @@ void main() {
         result += shadowVisibility * attenuation * directLight;
     }
 
+    result = pow(max(result, vec3(0.0)), vec3(1.0 / 2.2));
     Color = vec4(result, 1.0);
 }

@@ -32,6 +32,8 @@ class USDVIEW_WIDGET_API UsdviewEngine final : public IWidget {
     ~UsdviewEngine() override;
     bool BuildUI() override;
     void SetEditMode(bool editing);
+    void ReloadStage();
+    bool ProcessPendingRendererSwitch();
     bool borderless() override
     {
         return true;
@@ -77,6 +79,9 @@ class USDVIEW_WIDGET_API UsdviewEngine final : public IWidget {
     std::vector<uint8_t> texture_data_;
     const void* renderer_ui_control = nullptr;
     bool first_draw = true;
+    bool pending_renderer_switch_ = false;
+    unsigned pending_renderer_id_ = 0;
+    pxr::TfToken pending_renderer_token_;
     pxr::TfHashMap<pxr::TfToken, pxr::VtValue, pxr::TfHash> settings;
     nvrhi::TextureHandle persistent_texture;
     nvrhi::CommandListHandle command_list_;
@@ -85,7 +90,16 @@ class USDVIEW_WIDGET_API UsdviewEngine final : public IWidget {
     void OnFrame(float delta_time);
     void time_controller();
 
-    static void CreateGLContext();
+    void CreateGLContext();
+    void DestroyGLContext();
+    void QuiesceAndReleasePresentation();
+    void InitializeFreeCameraFromStage();
+    void RecreateRendererEngine(const pxr::TfToken* renderer_token = nullptr);
+    bool ApplyRendererPlugin(const pxr::TfToken& renderer_token);
+
+    void* gl_window_handle_ = nullptr;
+    void* gl_device_context_ = nullptr;
+    void* gl_render_context_ = nullptr;
 
    protected:
     bool JoystickButtonUpdate(int button, bool pressed) override;
@@ -116,6 +130,8 @@ class USDVIEW_WIDGET_API UsdviewEngine final : public IWidget {
     std::uint64_t camera_transform_subscription_id_ = 0;
     void subscribe_to_camera_transform_events();
     void on_camera_transform_modified();
+    void request_renderer_refresh();
+    void poll_stage_listener_changes();
 
     // Cache last camera state for delta calculation when Inspector modifies
     // transform

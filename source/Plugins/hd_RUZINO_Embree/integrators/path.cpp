@@ -1,6 +1,7 @@
 #include "path.h"
 
 #include <algorithm>
+#include <cmath>
 #include <random>
 
 #include "../surfaceInteraction.h"

@@ -146,6 +146,7 @@ class Hd_RUZINO_Rect_Light : public Hd_RUZINO_Light {
      float area;
      GfVec3f power;
      GfVec3f irradiance;
- };
+     GfVec3f radiance;
+  };
 
 RUZINO_NAMESPACE_CLOSE_SCOPE

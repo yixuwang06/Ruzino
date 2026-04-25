@@ -3,6 +3,7 @@
 #include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/materialNetwork2Interface.h>
 #include <pxr/imaging/hio/image.h>
+#include <spdlog/spdlog.h>
 
 #include "nvrhi/nvrhi.h"
 #include "pxr/base/arch/fileSystem.h"
@@ -24,16 +25,43 @@ HdMaterialNetwork2Interface Hd_RUZINO_Material::FetchNetInterface(
     HdMaterialNetwork2& hdNetwork,
     SdfPath& materialPath)
 {
+    spdlog::info("Material: FetchNetInterface start for '{}'", GetId().GetText());
     VtValue material = sceneDelegate->GetMaterialResource(GetId());
-    HdMaterialNetworkMap networkMap = material.Get<HdMaterialNetworkMap>();
 
-    bool isVolume;
-    hdNetwork = HdConvertToHdMaterialNetwork2(networkMap, &isVolume);
+    if (material.IsHolding<HdMaterialNetworkMap>()) {
+        const HdMaterialNetworkMap& networkMap =
+            material.UncheckedGet<HdMaterialNetworkMap>();
+
+        bool isVolume = false;
+        hdNetwork = HdConvertToHdMaterialNetwork2(networkMap, &isVolume);
+        spdlog::info(
+            "Material: FetchNetInterface converted HdMaterialNetworkMap for '{}' (isVolume={}, nodes={}, terminals={})",
+            GetId().GetText(),
+            isVolume,
+            hdNetwork.nodes.size(),
+            hdNetwork.terminals.size());
+    }
+    else if (material.IsHolding<HdMaterialNetwork2>()) {
+        hdNetwork = material.UncheckedGet<HdMaterialNetwork2>();
+        spdlog::info(
+            "Material: FetchNetInterface received HdMaterialNetwork2 directly for '{}' (nodes={}, terminals={})",
+            GetId().GetText(),
+            hdNetwork.nodes.size(),
+            hdNetwork.terminals.size());
+    }
+    else {
+        spdlog::warn(
+            "Material: unsupported material resource type for '{}' (resource empty={})",
+            GetId().GetText(),
+            material.IsEmpty());
+        hdNetwork = HdMaterialNetwork2{};
+    }
 
     materialPath = GetId();
 
     HdMaterialNetwork2Interface netInterface =
         HdMaterialNetwork2Interface(materialPath, &hdNetwork);
+    spdlog::info("Material: FetchNetInterface end for '{}'", GetId().GetText());
     return netInterface;
 }
 
@@ -54,9 +82,12 @@ void Hd_RUZINO_Material::Sync(
     HdRenderParam* renderParam,
     HdDirtyBits* dirtyBits)
 {
-    // Ensure material data handle is allocated
     auto render_param = static_cast<Hd_RUZINO_RenderParam*>(renderParam);
-    render_param->InstanceCollection->mark_materials_dirty();
+    if (*dirtyBits != HdChangeTracker::Clean) {
+        render_param->InstanceCollection->mark_materials_dirty();
+    }
+
+    *dirtyBits = HdChangeTracker::Clean;
 }
 
 void Hd_RUZINO_Material::ensure_material_data_handle(
@@ -74,10 +105,23 @@ void Hd_RUZINO_Material::ensure_material_data_handle(
         material_data_handle =
             render_param->InstanceCollection->material_pool.allocate(1);
 
-        MaterialHeader header;
-        header.material_blob_id = material_data_handle->index();
-        header.material_type_id = material_header_handle->index();
-        material_header_handle->write_data(&header);
+        material_header.material_blob_id = material_data_handle->index();
+        material_header.material_type_id = material_header_handle->index();
+        material_header_dirty = true;
+    }
+}
+
+void Hd_RUZINO_Material::upload_material_data()
+{
+    if (material_header_dirty && material_header_handle) {
+        spdlog::info(
+            "Material {}: uploading material header",
+            GetId().GetText());
+        material_header_handle->write_data(&material_header);
+        material_header_dirty = false;
+        spdlog::info(
+            "Material {}: material header uploaded",
+            GetId().GetText());
     }
 }
 

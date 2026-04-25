@@ -1,5 +1,7 @@
 #include "GPUContext/raytracing_context.hpp"
 
+#include <spdlog/spdlog.h>
+
 RUZINO_NAMESPACE_OPEN_SCOPE
 RaytracingContext::RaytracingContext(ResourceAllocator& r, ProgramVars& vars)
     : GPUContext(r, vars)
@@ -127,6 +129,7 @@ void RaytracingContext::announce_miss(
 
 void RaytracingContext::finish_announcing_shader_names()
 {
+    spdlog::info("RaytracingContext: finish_announcing_shader_names begin");
     // prepare the shaders
     resource_allocator_.destroy(ray_generation_shader);
     for (auto& hitgroup : hit_group_shaders) {
@@ -151,6 +154,9 @@ void RaytracingContext::finish_announcing_shader_names()
     if (ray_generation_program)
         local_program = ray_generation_program->get_programs()[0];
 
+    spdlog::info(
+        "RaytracingContext: creating ray generation shader '{}'",
+        raygeneration_name);
     nvrhi::ShaderDesc raygen_shader_desc;
     raygen_shader_desc.entryName = raygeneration_name.c_str();
     raygen_shader_desc.shaderType = nvrhi::ShaderType::RayGeneration;
@@ -160,9 +166,16 @@ void RaytracingContext::finish_announcing_shader_names()
         raygen_shader_desc,
         local_program->getBufferPointer(),
         local_program->getBufferSize());
+    spdlog::info("RaytracingContext: ray generation shader created");
 
     for (int i = 0; i < hitgroup_names.size(); ++i) {
         auto hitgroup = hitgroup_names[i];
+        spdlog::info(
+            "RaytracingContext: creating hitgroup {} (chs='{}', ahs='{}', is='{}')",
+            i,
+            std::get<0>(hitgroup),
+            std::get<1>(hitgroup),
+            std::get<2>(hitgroup));
 
         local_program = program;
         if (hitgroup_programs[i])
@@ -209,10 +222,15 @@ void RaytracingContext::finish_announcing_shader_names()
 
         hit_group_shaders.push_back(
             std::make_tuple(chs_shader, ahs_shader, is_shader));
+        spdlog::info("RaytracingContext: hitgroup {} shaders created", i);
     }
 
     for (int i = 0; i < callable_names.size(); ++i) {
         auto callable = callable_names[i];
+        spdlog::info(
+            "RaytracingContext: preparing callable {} ('{}')",
+            i,
+            callable);
 
         bool is_placeholder = callable.empty();
 
@@ -235,11 +253,23 @@ void RaytracingContext::finish_announcing_shader_names()
             callable_desc,
             local_program->getBufferPointer(),
             local_program->getBufferSize());
+        if (!callable_shader) {
+            spdlog::error(
+                "RaytracingContext: callable {} ('{}') creation returned null handle",
+                i,
+                callable);
+            return;
+        }
         callable_shaders.push_back(callable_shader);
+        spdlog::info("RaytracingContext: callable {} created", i);
     }
 
     for (int i = 0; i < miss_names.size(); ++i) {
         auto miss = miss_names[i];
+        spdlog::info(
+            "RaytracingContext: creating miss shader {} ('{}')",
+            i,
+            miss);
         local_program = program;
 
         if (miss_programs[i])
@@ -255,18 +285,21 @@ void RaytracingContext::finish_announcing_shader_names()
             local_program->getBufferPointer(),
             local_program->getBufferSize());
         miss_shaders.push_back(miss_shader);
+        spdlog::info("RaytracingContext: miss shader {} created", i);
     }
 
     // create the pipeline
+    spdlog::info("RaytracingContext: creating ray tracing pipeline");
     nvrhi::rt::PipelineDesc pipeline_desc;
-    // CallableData size calculation:
-    // - Basic fields: ~80 bytes
-    // - VertexInfo: ~112 bytes
-    // Total: ~192 bytes + padding = 256 bytes for safety
-    pipeline_desc.maxPayloadSize = 64 * sizeof(float);  // 256 bytes
+    pipeline_desc.maxPayloadSize = max_payload_size_;
     pipeline_desc.globalBindingLayouts = vars_.get_binding_layout();
-    pipeline_desc.maxRecursionDepth = 31;
-    pipeline_desc.maxAttributeSize = 4 * sizeof(float);
+    pipeline_desc.maxRecursionDepth = max_recursion_depth_;
+    pipeline_desc.maxAttributeSize = max_attribute_size_;
+    spdlog::info(
+        "RaytracingContext: pipeline limits payload_bytes={} recursion_depth={} attribute_bytes={}",
+        pipeline_desc.maxPayloadSize,
+        pipeline_desc.maxRecursionDepth,
+        pipeline_desc.maxAttributeSize);
     
     // Get hlslExtensionsUAV from the program descriptor
     // This tells D3D12 to reserve the specified UAV slot in the root signature for NVAPI
@@ -316,7 +349,9 @@ void RaytracingContext::finish_announcing_shader_names()
 
     resource_allocator_.destroy(raytracing_pipeline);
     raytracing_pipeline = resource_allocator_.create(pipeline_desc);
+    spdlog::info("RaytracingContext: ray tracing pipeline created");
 
+    spdlog::info("RaytracingContext: creating shader table");
     sbt = raytracing_pipeline->createShaderTable();
     sbt->setRayGenerationShader("Raygen");
     for (size_t i = 0; i < hit_group_shaders.size(); ++i) {
@@ -338,6 +373,8 @@ void RaytracingContext::finish_announcing_shader_names()
         std::string miss_export_name = "Miss" + std::to_string(i);
         sbt->addMissShader(miss_export_name.c_str());
     }
+    spdlog::info("RaytracingContext: shader table created");
+    spdlog::info("RaytracingContext: finish_announcing_shader_names end");
 }
 
 RUZINO_NAMESPACE_CLOSE_SCOPE

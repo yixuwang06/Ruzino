@@ -10,6 +10,10 @@ Hd_RUZINO_RenderInstanceCollection::Hd_RUZINO_RenderInstanceCollection()
               true)),
       draw_indirect_pool(BufferDesc{}.setIsDrawIndirectArgs(true))
 {
+    mesh_pool.reserve(1024);
+    material_header_pool.reserve(512);
+    material_pool.reserve(512);
+
     nvrhi::rt::AccelStructDesc tlasDesc;
     tlasDesc.isTopLevel = true;
     tlasDesc.topLevelMaxInstances = 1024 * 1024;
@@ -72,7 +76,6 @@ void Hd_RUZINO_RenderInstanceCollection::rebuild_tlas()
     command_list->endMarker();
     command_list->close();
     nvrhi_device->executeCommandList(command_list);
-    nvrhi_device->waitForIdle();
 }
 
 RUZINO_NAMESPACE_CLOSE_SCOPE

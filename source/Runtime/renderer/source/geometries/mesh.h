@@ -54,6 +54,8 @@ class HD_RUZINO_API Hd_RUZINO_Mesh final : public HdMesh {
         HdDirtyBits* dirtyBits,
         const TfToken& reprToken) override;
 
+    void upload_gpu_data(Hd_RUZINO_RenderParam* render_param);
+
     void Finalize(HdRenderParam* renderParam) override;
 
     nvrhi::rt::AccelStructHandle BLAS;
@@ -67,6 +69,17 @@ class HD_RUZINO_API Hd_RUZINO_Mesh final : public HdMesh {
     DeviceMemoryPool<nvrhi::rt::InstanceDesc>::MemoryHandle rt_instanceBuffer;
     DeviceMemoryPool<MeshDesc>::MemoryHandle mesh_desc_buffer;
     DeviceMemoryPool<nvrhi::DrawIndirectArguments>::MemoryHandle draw_indirect;
+    MeshDesc cached_mesh_desc = {};
+    bool mesh_desc_dirty = false;
+    GeometryInstanceData cached_instance_data = {};
+    nvrhi::rt::InstanceDesc cached_rt_instance = {};
+    nvrhi::DrawIndirectArguments cached_draw_indirect = {};
+    bool instance_data_dirty = false;
+    bool rt_instance_dirty = false;
+    bool draw_indirect_dirty = false;
+    bool pending_single_instance_upload = false;
+    size_t pending_single_instance_count = 0;
+    int pending_material_location = -1;
 
     GfMatrix4f transform;
     VtArray<GfVec3i> triangulatedIndices;

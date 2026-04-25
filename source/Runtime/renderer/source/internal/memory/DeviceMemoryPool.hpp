@@ -2,6 +2,7 @@
 #include <RHI/rhi.hpp>
 #include <algorithm>
 #include <mutex>
+#include <spdlog/spdlog.h>
 #include <sstream>
 
 #include "../../api.h"
@@ -127,11 +128,25 @@ class DeviceMemoryPool {
 template<typename T>
 void DeviceMemoryPool<T>::reserve(size_t size)
 {
+    spdlog::info(
+        "DeviceMemoryPool<{}>::reserve begin size={} current_max={} target_max={}",
+        typeid(T).name(),
+        size,
+        max_count,
+        targeted_max_count);
+    std::lock_guard exec_lock(execution_launch_mutex);
+    std::lock_guard pool_lock(buffer_write_mutex_);
+
     while (size > targeted_max_count) {
         targeted_max_count *= 2;
     }
 
     relocate_buffer();
+    spdlog::info(
+        "DeviceMemoryPool<{}>::reserve end current_max={} target_max={}",
+        typeid(T).name(),
+        max_count,
+        targeted_max_count);
 }
 
 template<typename T>
@@ -144,16 +159,28 @@ DeviceMemoryPool<T>::MemoryHandleData::create()
 template<typename T>
 void DeviceMemoryPool<T>::MemoryHandleData::write_data(const void* data)
 {
+    spdlog::info(
+        "DeviceMemoryPool<{}>::write_data begin offset={} size={}",
+        typeid(T).name(),
+        offset,
+        size);
     std::lock_guard lock(execution_launch_mutex);
+    auto device = RHI::get_device();
     auto device_buffer = pool->get_device_buffer();
+    auto command_list =
+        device->createCommandList({ .enableImmediateExecution = false });
 
-    pool->commandList->open();
-    pool->commandList->writeBuffer(device_buffer, data, size, offset);
+    command_list->open();
+    command_list->writeBuffer(device_buffer, data, size, offset);
 
-    pool->commandList->close();
+    command_list->close();
 
-    RHI::get_device()->executeCommandList(
-        pool->commandList, nvrhi::CommandQueue::Copy);
+    device->executeCommandList(command_list);
+    spdlog::info(
+        "DeviceMemoryPool<{}>::write_data end offset={} size={}",
+        typeid(T).name(),
+        offset,
+        size);
 }
 
 template<typename T>
@@ -161,17 +188,31 @@ void DeviceMemoryPool<T>::MemoryHandleData::write_data(
     const void* data,
     size_t bias_count)
 {
+    spdlog::info(
+        "DeviceMemoryPool<{}>::write_data(bias) begin offset={} size={} bias_count={}",
+        typeid(T).name(),
+        offset,
+        size,
+        bias_count);
     std::lock_guard lock(execution_launch_mutex);
+    auto device = RHI::get_device();
     auto device_buffer = pool->get_device_buffer();
+    auto command_list =
+        device->createCommandList({ .enableImmediateExecution = false });
 
-    pool->commandList->open();
-    pool->commandList->writeBuffer(
+    command_list->open();
+    command_list->writeBuffer(
         device_buffer, data, sizeof(T), offset + bias_count * sizeof(T));
 
-    pool->commandList->close();
+    command_list->close();
 
-    RHI::get_device()->executeCommandList(
-        pool->commandList, nvrhi::CommandQueue::Copy);
+    device->executeCommandList(command_list);
+    spdlog::info(
+        "DeviceMemoryPool<{}>::write_data(bias) end offset={} size={} bias_count={}",
+        typeid(T).name(),
+        offset,
+        size,
+        bias_count);
 }
 
 template<typename T>
@@ -317,13 +358,22 @@ template<typename T>
 typename DeviceMemoryPool<T>::MemoryHandle DeviceMemoryPool<T>::allocate(
     size_t count)
 {
+    spdlog::info(
+        "DeviceMemoryPool<{}>::allocate begin count={} current_count={} current_max_offset={} max_count={} target_max={}",
+        typeid(T).name(),
+        count,
+        current_count,
+        current_max_memory_offset,
+        max_count,
+        targeted_max_count);
+    std::lock_guard exec_lock(execution_launch_mutex);
+    std::lock_guard pool_lock(buffer_write_mutex_);
+
     MemoryHandle handle = MemoryHandleData::create();
 
     auto size = count * sizeof(T);
     handle->size = size;
     handle->pool = this;
-
-    std::lock_guard lock(buffer_write_mutex_);
 
     for (auto free_handle = h_free_list.begin();
          free_handle != h_free_list.end();
@@ -355,6 +405,16 @@ typename DeviceMemoryPool<T>::MemoryHandle DeviceMemoryPool<T>::allocate(
     }
 
     relocate_buffer();
+
+    spdlog::info(
+        "DeviceMemoryPool<{}>::allocate end offset={} size={} current_count={} current_max_offset={} max_count={} target_max={}",
+        typeid(T).name(),
+        handle->offset,
+        handle->size,
+        current_count,
+        current_max_memory_offset,
+        max_count,
+        targeted_max_count);
 
     return handle;
 }
@@ -504,26 +564,63 @@ template<typename T>
 void DeviceMemoryPool<T>::relocate_buffer()
 {
     if (max_count != targeted_max_count) {
+        spdlog::info(
+            "DeviceMemoryPool<{}>::relocate_buffer begin old_max={} new_target={}",
+            typeid(T).name(),
+            max_count,
+            targeted_max_count);
         nvrhi::BufferDesc bufferDesc = buffer_desc<T>();
         bufferDesc.byteSize = targeted_max_count * sizeof(T);
         bufferDesc.debugName = "DeviceObjectPoolBuffer";
+        spdlog::info(
+            "DeviceMemoryPool<{}>::relocate_buffer creating replacement buffer byteSize={}",
+            typeid(T).name(),
+            bufferDesc.byteSize);
         auto new_device_buffer = RHI::get_device()->createBuffer(bufferDesc);
+        spdlog::info(
+            "DeviceMemoryPool<{}>::relocate_buffer replacement buffer created",
+            typeid(T).name());
 
-        std::lock_guard lock(execution_launch_mutex);
+        if (current_max_memory_offset == 0 || current_count == 0) {
+            max_count = targeted_max_count;
+            device_buffer = new_device_buffer;
+            spdlog::info(
+                "DeviceMemoryPool<{}>::relocate_buffer fast-path end max_count={}",
+                typeid(T).name(),
+                max_count);
+            return;
+        }
 
-        commandList->open();
-        commandList->copyBuffer(
+        auto device = RHI::get_device();
+        auto command_list =
+            device->createCommandList({ .enableImmediateExecution = false });
+        spdlog::info(
+            "DeviceMemoryPool<{}>::relocate_buffer command list created",
+            typeid(T).name());
+
+        command_list->open();
+        command_list->copyBuffer(
             new_device_buffer, 0, device_buffer, 0, max_count * sizeof(T));
 
-        commandList->close();
-        RHI::get_device()->executeCommandList(
-            commandList, nvrhi::CommandQueue::Copy);
+        command_list->close();
+        spdlog::info(
+            "DeviceMemoryPool<{}>::relocate_buffer submitting copy old_bytes={}",
+            typeid(T).name(),
+            max_count * sizeof(T));
+        device->executeCommandList(command_list);
+        spdlog::info(
+            "DeviceMemoryPool<{}>::relocate_buffer copy submission returned",
+            typeid(T).name());
         // RHI::get_device()->waitForIdle();
         // RHI::get_device()->runGarbageCollection();
 
         max_count = targeted_max_count;
 
         device_buffer = new_device_buffer;
+        spdlog::info(
+            "DeviceMemoryPool<{}>::relocate_buffer end max_count={}",
+            typeid(T).name(),
+            max_count);
     }
 }
 

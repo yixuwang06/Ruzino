@@ -49,6 +49,7 @@ class Hd_RUZINO_Renderer {
 
     const Hd_RUZINO_Camera* camera_ = nullptr;
     Hd_RUZINO_RenderParam* render_param;
+    std::atomic<bool> pending_accumulation_reset_ = false;
 
 };
 

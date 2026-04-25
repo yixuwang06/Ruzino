@@ -154,7 +154,9 @@ GLuint Hd_RUZINO_Material::createTextureFromHioImage(
             float roughness_value = roughness.value.Get<float>();
             (metallic.value.CanCast<float>());
             (roughness.value.CanCast<float>());
-            float color[4] = { 0, metallic_value, roughness_value, 1.0f };
+            // Match the glTF metallic-roughness layout used by the shader:
+            // G = roughness, B = metallic, and the shader reads .zy.
+            float color[4] = { 0, roughness_value, metallic_value, 1.0f };
             glTexImage2D(
                 GL_TEXTURE_2D,
                 0,

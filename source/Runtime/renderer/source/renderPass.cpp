@@ -24,6 +24,7 @@
 #include "renderPass.h"
 
 #include <iostream>
+#include <spdlog/spdlog.h>
 
 #include "pxr/imaging/hd/renderBuffer.h"
 #include "pxr/imaging/hd/renderDelegate.h"
@@ -50,6 +51,10 @@ Hd_RUZINO_RenderPass::Hd_RUZINO_RenderPass(
 
 Hd_RUZINO_RenderPass::~Hd_RUZINO_RenderPass()
 {
+    if (_renderThread && _renderThread->IsThreadRunning()) {
+        _renderThread->StopRender();
+    }
+
     std::cout << "Destroying renderPass" << std::endl;
 }
 
@@ -70,7 +75,7 @@ void Hd_RUZINO_RenderPass::_Execute(
     const HdRenderPassStateSharedPtr& renderPassState,
     const TfTokenVector& renderTags)
 {
-    
+    spdlog::info("Hd_RUZINO_RenderPass::_Execute begin");
 
     int currentSceneVersion = _sceneVersion->load();
     if (_lastSceneVersion != currentSceneVersion) {
@@ -135,11 +140,17 @@ void Hd_RUZINO_RenderPass::_Execute(
     TF_VERIFY(!_aovBindings.empty(), "No aov bindings to render into");
     // Only start a new render if something in the scene has changed.
     if (needStartRender) {
+        spdlog::info("Hd_RUZINO_RenderPass::_Execute starting render thread");
         _renderer->MarkAovBuffersUnconverged();
         _renderer->Clear();
-        _renderThread->StartRender();
+        if (_renderThread->IsThreadRunning()) {
+            _renderThread->StartRender();
+        }
+        needStartRender = false;
         //_renderer->Render(nullptr);
+        spdlog::info("Hd_RUZINO_RenderPass::_Execute StartRender returned");
     }
+    spdlog::info("Hd_RUZINO_RenderPass::_Execute end");
 }
 
 bool Hd_RUZINO_RenderPass::IsConverged() const

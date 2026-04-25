@@ -6,6 +6,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Framework includes
@@ -54,6 +55,152 @@
 using namespace Ruzino;
 using namespace pxr;
 using namespace RenderUtil;
+
+namespace {
+
+HgiFormat ConvertNvrhiFormatToHgiFormatForHeadlessSave(nvrhi::Format format)
+{
+    switch (format) {
+        case nvrhi::Format::RGBA32_FLOAT: return HgiFormatFloat32Vec4;
+        case nvrhi::Format::RGB32_FLOAT: return HgiFormatFloat32Vec3;
+        case nvrhi::Format::RGBA16_FLOAT: return HgiFormatFloat16Vec4;
+        case nvrhi::Format::RGBA8_UNORM: return HgiFormatUNorm8Vec4;
+        case nvrhi::Format::SRGBA8_UNORM: return HgiFormatUNorm8Vec4srgb;
+        default: return HgiFormatInvalid;
+    }
+}
+
+bool ReadTextureFromRenderNodeSystem(
+    UsdImagingGLEngine* renderer,
+    int width,
+    int height,
+    std::vector<uint8_t>& texture_data,
+    HgiFormat& texture_format)
+{
+    auto value = renderer->GetRendererSetting(pxr::TfToken("RenderNodeSystem"));
+    if (!value.IsHolding<const void*>()) {
+        spdlog::warn("RenderNodeSystem renderer setting is unavailable");
+        return false;
+    }
+
+    auto node_system_ptr =
+        static_cast<const std::shared_ptr<NodeSystem>*>(value.Get<const void*>());
+    if (!node_system_ptr || !(*node_system_ptr)) {
+        spdlog::warn("RenderNodeSystem renderer setting returned a null node system");
+        return false;
+    }
+
+    auto node_system = *node_system_ptr;
+    auto* tree = node_system->get_node_tree();
+    auto executor = node_system->get_node_tree_executor();
+    if (!tree || !executor) {
+        spdlog::warn("RenderNodeSystem is missing a node tree or executor");
+        return false;
+    }
+
+    auto try_socket = [&](Node* node, NodeSocket* socket, const char* socket_role) {
+        if (!socket) {
+            return false;
+        }
+
+        entt::meta_any data;
+        executor->sync_node_to_external_storage(socket, data);
+        if (!data) {
+            if (auto* direct_value = executor->get_socket_value(socket);
+                direct_value && *direct_value) {
+                data = *direct_value;
+            }
+        }
+
+        if (!data || !data.allow_cast<nvrhi::TextureHandle>()) {
+            return false;
+        }
+
+        nvrhi::TextureHandle texture = data.cast<nvrhi::TextureHandle>();
+        if (!texture) {
+            return false;
+        }
+
+        nvrhi::Format nvrhi_format = nvrhi::Format::UNKNOWN;
+        if (!ReadTextureHandleDirectly(
+                texture, width, height, texture_data, &nvrhi_format)) {
+            return false;
+        }
+
+        texture_format = ConvertNvrhiFormatToHgiFormatForHeadlessSave(nvrhi_format);
+        spdlog::info(
+            "Recovered texture from RenderNodeSystem node '{}' ({})",
+            node->ui_name.empty() ? node->typeinfo->id_name.c_str()
+                                  : node->ui_name.c_str(),
+            socket_role);
+        return true;
+    };
+
+    const std::vector<std::string> preferred_node_ids = {
+        "present_color",
+        "gamma_correction",
+        "automatic_tonemapper",
+        "accumulate",
+        "hw7_path_tracing",
+        "path_tracing"
+    };
+
+    for (const auto& preferred_id : preferred_node_ids) {
+        for (auto&& node : tree->nodes) {
+            if (!node || std::string(node->typeinfo->id_name) != preferred_id) {
+                continue;
+            }
+
+            if (preferred_id == "present_color" && node->get_inputs().empty()) {
+                spdlog::warn("present_color node has no input sockets");
+            }
+
+            for (auto* input : node->get_inputs()) {
+                if (try_socket(node.get(), input, "input")) {
+                    return true;
+                }
+            }
+            for (auto* output : node->get_outputs()) {
+                if (try_socket(node.get(), output, "output")) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    for (auto&& node : tree->nodes) {
+        if (!node) {
+            continue;
+        }
+        for (auto* input : node->get_inputs()) {
+            if (try_socket(node.get(), input, "generic input")) {
+                return true;
+            }
+        }
+        for (auto* output : node->get_outputs()) {
+            if (try_socket(node.get(), output, "generic output")) {
+                return true;
+            }
+        }
+    }
+
+    spdlog::warn("No usable texture could be recovered from RenderNodeSystem");
+    return false;
+}
+
+bool HasPublishedVulkanColorAov(UsdImagingGLEngine* renderer)
+{
+    auto hacked_handle = renderer->GetRendererSetting(pxr::TfToken("VulkanColorAov"));
+    if (!hacked_handle.IsHolding<const void*>()) {
+        return false;
+    }
+
+    auto rendered = *reinterpret_cast<const nvrhi::TextureHandle*>(
+        hacked_handle.Get<const void*>());
+    return rendered != nullptr;
+}
+
+}
 
 int main(int argc, char* argv[])
 {
@@ -134,6 +281,11 @@ int main(int argc, char* argv[])
     int num_frames = parser.get<int>("frames");
     float fps = parser.get<float>("fps");
     float delta_time = 1.0f / fps;
+
+    // Keep the runtime renderer's internal progressive loop aligned with the
+    // CLI-facing spp argument used by headless validation.
+    pxr::TfSetenv(
+        "Hd_RUZINO_SAMPLES_TO_CONVERGENCE", std::to_string(std::max(1, spp)).c_str());
 
     // Validate input files
     if (!std::filesystem::exists(usd_file)) {
@@ -341,13 +493,34 @@ int main(int argc, char* argv[])
             long long total_sample_time = 0;
             int timed_samples = 0;
 
-            // Storm renderer: single render pass, Ruzino: use spp
-            int samples_to_render = is_storm_renderer ? 1 : spp;
+            // The runtime Ruzino renderer is already progressive internally and
+            // uses Hd_RUZINO_SAMPLES_TO_CONVERGENCE. Driving it with an outer
+            // spp loop just repeats full renders and can stall headless runs.
+            int samples_to_render = 1;
 
             for (int sample = 0; sample < samples_to_render; ++sample) {
                 auto sample_start = std::chrono::high_resolution_clock::now();
 
                 renderer->Render(root, render_params);
+
+                if (is_ruzino_renderer) {
+                    constexpr auto kPollInterval =
+                        std::chrono::milliseconds(10);
+                    constexpr auto kRenderTimeout =
+                        std::chrono::seconds(60);
+                    auto wait_start = std::chrono::steady_clock::now();
+
+                    while (!renderer->IsConverged() &&
+                           !HasPublishedVulkanColorAov(renderer.get())) {
+                        if (std::chrono::steady_clock::now() - wait_start >
+                            kRenderTimeout) {
+                            spdlog::warn(
+                                "headless_render timed out waiting for convergence or a published VulkanColorAov texture");
+                            break;
+                        }
+                        std::this_thread::sleep_for(kPollInterval);
+                    }
+                }
 
                 // Wait for idle and cleanup only for Ruzino renderer
                 if (is_ruzino_renderer) {
@@ -491,6 +664,21 @@ int main(int argc, char* argv[])
                     "Detected texture format: {}",
                     static_cast<int>(texture_format));
             }
+            else {
+                auto hacked_handle =
+                    renderer->GetRendererSetting(pxr::TfToken("VulkanColorAov"));
+                if (hacked_handle.IsHolding<const void*>()) {
+                    auto rendered = *reinterpret_cast<const nvrhi::TextureHandle*>(
+                        hacked_handle.Get<const void*>());
+                    if (auto* texture = rendered.Get()) {
+                        texture_format = ConvertNvrhiFormatToHgiFormatForHeadlessSave(
+                            texture->getDesc().format);
+                        spdlog::info(
+                            "Derived texture format from VulkanColorAov: {}",
+                            static_cast<int>(texture_format));
+                    }
+                }
+            }
 
             bool success = ReadTextureDirectly(
                 renderer.get(), width, height, texture_data);
@@ -498,6 +686,11 @@ int main(int argc, char* argv[])
             if (!success) {
                 success = ReadTextureCPU(
                     renderer.get(), hgi, width, height, texture_data);
+            }
+
+            if (!success && is_ruzino_renderer) {
+                success = ReadTextureFromRenderNodeSystem(
+                    renderer.get(), width, height, texture_data, texture_format);
             }
 
             if (!success) {

@@ -8,7 +8,7 @@ NODE_DEF_OPEN_SCOPE
 NODE_DECLARATION_FUNCTION(automatic_tonemapper)
 {
     b.add_input<nvrhi::TextureHandle>("InputTexture");
-    b.add_input<float>("Scale").min(0).max(20).default_val(1);
+    b.add_input<float>("Scale").min(0).max(20).default_val(0.001f);
     b.add_output<nvrhi::TextureHandle>("OutputTexture");
 }
 

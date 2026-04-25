@@ -291,6 +291,7 @@ void Hd_RUZINO_Points::Sync(
 {
     HD_TRACE_FUNCTION();
     HF_MALLOC_TAG_FUNCTION();
+    bool had_scene_dirty = (*dirtyBits != HdChangeTracker::Clean);
 
     const SdfPath& id = GetId();
     Hd_RUZINO_RenderParam* render_param =
@@ -354,8 +355,10 @@ void Hd_RUZINO_Points::Sync(
     if (_pointsValid && BLAS) {
         updateTLAS(render_param, sceneDelegate, dirtyBits);
     }
-    static_cast<Hd_RUZINO_RenderParam*>(renderParam)
-        ->InstanceCollection->mark_geometry_dirty();
+    if (had_scene_dirty) {
+        static_cast<Hd_RUZINO_RenderParam*>(renderParam)
+            ->InstanceCollection->mark_geometry_dirty();
+    }
 
     *dirtyBits = HdChangeTracker::Clean;
 }

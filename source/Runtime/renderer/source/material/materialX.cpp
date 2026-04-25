@@ -21,6 +21,44 @@ TF_DEFINE_PRIVATE_TOKENS(_tokens, (file)(sourceColorSpace)(raw)(srgb));
 
 namespace mx = MaterialX;
 
+namespace {
+float get_float_param_or(
+    const HdMaterialNetwork2Interface& netInterface,
+    const TfToken& nodeName,
+    const TfToken& paramName,
+    float fallback)
+{
+    VtValue value = netInterface.GetNodeParameterValue(nodeName, paramName);
+    if (value.IsHolding<float>()) {
+        return value.UncheckedGet<float>();
+    }
+    if (value.IsHolding<double>()) {
+        return static_cast<float>(value.UncheckedGet<double>());
+    }
+    if (value.IsHolding<int>()) {
+        return static_cast<float>(value.UncheckedGet<int>());
+    }
+    return fallback;
+}
+
+GfVec3f get_vec3_param_or(
+    const HdMaterialNetwork2Interface& netInterface,
+    const TfToken& nodeName,
+    const TfToken& paramName,
+    const GfVec3f& fallback)
+{
+    VtValue value = netInterface.GetNodeParameterValue(nodeName, paramName);
+    if (value.IsHolding<GfVec3f>()) {
+        return value.UncheckedGet<GfVec3f>();
+    }
+    if (value.IsHolding<GfVec4f>()) {
+        auto v = value.UncheckedGet<GfVec4f>();
+        return GfVec3f(v[0], v[1], v[2]);
+    }
+    return fallback;
+}
+}  // namespace
+
 MaterialX::GenContextPtr Hd_RUZINO_MaterialX::shader_gen_context_ =
     std::make_shared<mx::GenContext>(mx::SlangShaderGenerator::create());
 MaterialX::DocumentPtr Hd_RUZINO_MaterialX::libraries = mx::createDocument();
@@ -73,7 +111,13 @@ void Hd_RUZINO_MaterialX::Sync(
 
     auto param = static_cast<Hd_RUZINO_RenderParam*>(renderParam);
 
+    spdlog::info(
+        "MaterialX::Sync ensuring material handles for '{}'",
+        GetId().GetText());
     ensure_material_data_handle(param);
+    spdlog::info(
+        "MaterialX::Sync material handles ready for '{}'",
+        GetId().GetText());
 
     // First check if this material has a custom shader_path
     const SdfPath& id = GetId();
@@ -129,8 +173,16 @@ void Hd_RUZINO_MaterialX::Sync(
 
     SdfPath surfTerminalPath;
     HdMaterialNode2 const* surfTerminal;
+    spdlog::info(
+        "MaterialX::Sync fetching material network for '{}'",
+        GetId().GetText());
     HdMaterialNetwork2Interface netInterface = FetchMaterialNetwork(
         sceneDelegate, hdNetwork, materialPath, surfTerminalPath, surfTerminal);
+    spdlog::info(
+        "MaterialX::Sync fetched material network for '{}' (nodes={}, terminals={})",
+        GetId().GetText(),
+        hdNetwork.nodes.size(),
+        hdNetwork.terminals.size());
 
     spdlog::info(
         "MaterialX: MaterialPath = '{}', SurfTerminalPath = '{}'",
@@ -144,6 +196,60 @@ void Hd_RUZINO_MaterialX::Sync(
             GetId().GetText());
         *dirtyBits = HdChangeTracker::Clean;
         return;
+    }
+
+    {
+        TfToken surfaceNodeName(surfTerminalPath.GetName());
+        TfToken surfaceNodeType = netInterface.GetNodeType(surfaceNodeName);
+        HW7PreviewMaterialData hw7Preview;
+
+        if (surfaceNodeType == TfToken("UsdPreviewSurface")) {
+            GfVec3f baseColor = get_vec3_param_or(
+                netInterface,
+                surfaceNodeName,
+                TfToken("diffuseColor"),
+                GfVec3f(0.8f, 0.8f, 0.8f));
+            GfVec3f emissiveColor = get_vec3_param_or(
+                netInterface,
+                surfaceNodeName,
+                TfToken("emissiveColor"),
+                GfVec3f(0.f, 0.f, 0.f));
+            float roughness = get_float_param_or(
+                netInterface, surfaceNodeName, TfToken("roughness"), 0.5f);
+            float metallic = get_float_param_or(
+                netInterface, surfaceNodeName, TfToken("metallic"), 0.0f);
+
+            hw7Preview.baseColorRoughness =
+                GfVec4f(baseColor[0], baseColor[1], baseColor[2], roughness);
+            hw7Preview.emissiveMetallic = GfVec4f(
+                emissiveColor[0], emissiveColor[1], emissiveColor[2], metallic);
+        }
+        else {
+            GfVec3f baseColor = get_vec3_param_or(
+                netInterface,
+                surfaceNodeName,
+                TfToken("base_color"),
+                GfVec3f(0.8f, 0.8f, 0.8f));
+            GfVec3f emissiveColor = get_vec3_param_or(
+                netInterface,
+                surfaceNodeName,
+                TfToken("emission_color"),
+                GfVec3f(0.f, 0.f, 0.f));
+            float roughness = get_float_param_or(
+                netInterface,
+                surfaceNodeName,
+                TfToken("specular_roughness"),
+                0.5f);
+            float metallic = get_float_param_or(
+                netInterface, surfaceNodeName, TfToken("metalness"), 0.0f);
+
+            hw7Preview.baseColorRoughness =
+                GfVec4f(baseColor[0], baseColor[1], baseColor[2], roughness);
+            hw7Preview.emissiveMetallic = GfVec4f(
+                emissiveColor[0], emissiveColor[1], emissiveColor[2], metallic);
+        }
+
+        set_hw7_preview_material_data(hw7Preview);
     }
 
     HdMtlxTexturePrimvarData hdMtlxData;
@@ -956,7 +1062,7 @@ void Hd_RUZINO_MaterialX::MtlxGenerateShader(
                 "updates",
                 cached_parameter_mappings.size());
 
-            material_data_handle->write_data(&material_data);
+            material_data_dirty = true;
 
             spdlog::info(
                 "MaterialX: Shader generation complete for '{}'",
@@ -974,10 +1080,23 @@ void Hd_RUZINO_MaterialX::MtlxGenerateShader(
 
 void Hd_RUZINO_MaterialX::upload_material_data()
 {
+    spdlog::info(
+        "MaterialX {}: upload_material_data begin",
+        GetId().GetText());
+    Hd_RUZINO_Material::upload_material_data();
     if (material_data_dirty && material_data_handle) {
+        spdlog::info(
+            "MaterialX {}: uploading material data blob",
+            GetId().GetText());
         material_data_handle->write_data(&material_data);
         material_data_dirty = false;
+        spdlog::info(
+            "MaterialX {}: material data blob uploaded",
+            GetId().GetText());
     }
+    spdlog::info(
+        "MaterialX {}: upload_material_data end",
+        GetId().GetText());
 }
 
 size_t Hd_RUZINO_MaterialX::compute_network_hash(
@@ -1128,9 +1247,9 @@ void Hd_RUZINO_MaterialX::update_parameters_incremental(
 
     // Upload updated data to GPU
     if (updated_count > 0) {
-        material_data_handle->write_data(&material_data);
+        material_data_dirty = true;
         spdlog::info(
-            "MaterialX: Incremental update wrote {} parameters to GPU for "
+            "MaterialX: Incremental update queued {} parameters for GPU upload for "
             "material '{}'",
             updated_count,
             GetId().GetText());

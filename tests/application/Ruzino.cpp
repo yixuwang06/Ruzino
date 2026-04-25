@@ -2,15 +2,21 @@
 
 #include <MaterialXCore/Document.h>
 #include <MaterialXFormat/XmlIo.h>
+#include <pxr/base/tf/diagnosticMgr.h>
 #include <pxr/base/tf/stringUtils.h>
 #include <rzconsole/ConsoleInterpreter.h>
 #include <rzconsole/ConsoleObjects.h>
 #include <rzconsole/imgui_console.h>
 #include <rzconsole/spdlog_console_sink.h>
 #include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <any>
+#include <chrono>
+#include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <rzpython/interpreter.hpp>
 #include <rzpython/rzpython.hpp>
 
@@ -20,6 +26,7 @@
 #include "GUI/window.h"
 #include "MCore/MaterialXNodeTree.hpp"
 #include "MCore/MaterialXNodeTreeWidget.h"
+#include "nodes/core/io/json.hpp"
 #include "nodes/system/node_system.hpp"
 #include "nodes/ui/imgui.hpp"
 #include "pxr/base/tf/setenv.h"
@@ -29,8 +36,509 @@
 #include "widgets/usdtree/usd_fileviewer.h"
 #include "widgets/usdview/usdview_widget.hpp"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 using namespace Ruzino;
 namespace mx = MaterialX;
+
+namespace {
+constexpr std::size_t kTerminalLogMaxSize = 8 * 1024 * 1024;
+constexpr int kTerminalLogMaxFiles = 3;
+constexpr std::size_t kTerminalStreamBufferSize = 4 * 1024;
+
+enum class TerminalCaptureMode {
+    Disabled,
+    Stderr,
+    StdoutStderr,
+};
+
+enum class TerminalRetentionMode {
+    Overwrite,
+    Append,
+    Rotate,
+};
+
+enum class TerminalFlushMode {
+    Balanced,
+    Realtime,
+    Performance,
+};
+
+struct TerminalCaptureConfig {
+    TerminalCaptureMode mode = TerminalCaptureMode::Stderr;
+    TerminalRetentionMode retention = TerminalRetentionMode::Overwrite;
+    TerminalFlushMode flush = TerminalFlushMode::Balanced;
+};
+
+struct RendererNodeWidgetSettings : public FileBasedNodeWidgetSettings {
+    std::string widget_name;
+
+    std::string WidgetName() const override
+    {
+        return widget_name;
+    }
+};
+
+class UsdDiagnosticFileDelegate final : public pxr::TfDiagnosticMgr::Delegate {
+   public:
+    void IssueError(const pxr::TfError& err) override
+    {
+        LogDiagnostic("USD error", err, spdlog::level::err);
+    }
+
+    void IssueFatalError(
+        const pxr::TfCallContext& context,
+        const std::string& msg) override
+    {
+        spdlog::critical(
+            "USD fatal [{}:{}] {}: {}",
+            context.GetFile(),
+            context.GetLine(),
+            context.GetFunction(),
+            msg);
+        if (auto logger = spdlog::default_logger()) {
+            logger->flush();
+        }
+        _UnhandledAbort();
+    }
+
+    void IssueStatus(const pxr::TfStatus& status) override
+    {
+        LogDiagnostic("USD status", status, spdlog::level::info);
+    }
+
+    void IssueWarning(const pxr::TfWarning& warning) override
+    {
+        LogDiagnostic("USD warning", warning, spdlog::level::warn);
+    }
+
+   private:
+    template<typename DiagnosticT>
+    static void LogDiagnostic(
+        const char* kind,
+        const DiagnosticT& diagnostic,
+        spdlog::level::level_enum level)
+    {
+        spdlog::log(
+            level,
+            "{} [{}] [{}:{}] {}: {}",
+            kind,
+            diagnostic.GetDiagnosticCodeAsString(),
+            diagnostic.GetSourceFileName(),
+            diagnostic.GetSourceLineNumber(),
+            diagnostic.GetSourceFunction(),
+            diagnostic.GetCommentary());
+        if (auto logger = spdlog::default_logger()) {
+            logger->flush();
+        }
+    }
+};
+
+const char* to_string(TerminalCaptureMode mode)
+{
+    switch (mode) {
+        case TerminalCaptureMode::Disabled: return "disabled";
+        case TerminalCaptureMode::Stderr: return "stderr";
+        case TerminalCaptureMode::StdoutStderr: return "stdout_stderr";
+    }
+    return "stderr";
+}
+
+const char* to_string(TerminalRetentionMode retention)
+{
+    switch (retention) {
+        case TerminalRetentionMode::Overwrite: return "overwrite";
+        case TerminalRetentionMode::Append: return "append";
+        case TerminalRetentionMode::Rotate: return "rotate";
+    }
+    return "overwrite";
+}
+
+const char* to_string(TerminalFlushMode flush)
+{
+    switch (flush) {
+        case TerminalFlushMode::Balanced: return "balanced";
+        case TerminalFlushMode::Realtime: return "realtime";
+        case TerminalFlushMode::Performance: return "performance";
+    }
+    return "balanced";
+}
+
+std::filesystem::path get_terminal_capture_config_path()
+{
+    return std::filesystem::current_path() / "Ruzino.logging.json";
+}
+
+template<typename EnumT>
+bool parse_config_enum(
+    const nlohmann::json& value,
+    EnumT& out_value,
+    std::initializer_list<std::pair<const char*, EnumT>> mapping)
+{
+    if (!value.is_string()) {
+        return false;
+    }
+
+    const std::string requested = value.get<std::string>();
+    for (const auto& [key, enum_value] : mapping) {
+        if (requested == key) {
+            out_value = enum_value;
+            return true;
+        }
+    }
+    return false;
+}
+
+TerminalCaptureConfig load_terminal_capture_config()
+{
+    TerminalCaptureConfig config;
+    const auto config_path = get_terminal_capture_config_path();
+    if (!std::filesystem::exists(config_path)) {
+        spdlog::info(
+            "Terminal capture config not found at {}; using defaults: mode={}, retention={}, flush={}",
+            config_path.string(),
+            to_string(config.mode),
+            to_string(config.retention),
+            to_string(config.flush));
+        return config;
+    }
+
+    try {
+        std::ifstream file(config_path);
+        nlohmann::json json;
+        file >> json;
+
+        if (!json.is_object()) {
+            throw std::runtime_error("root must be a JSON object");
+        }
+
+        if (json.contains("terminal_capture")) {
+            const auto& capture_json = json.at("terminal_capture");
+            if (!capture_json.is_object()) {
+                throw std::runtime_error("'terminal_capture' must be an object");
+            }
+
+            if (capture_json.contains("mode") &&
+                !parse_config_enum(
+                    capture_json.at("mode"),
+                    config.mode,
+                    { { "disabled", TerminalCaptureMode::Disabled },
+                      { "stderr", TerminalCaptureMode::Stderr },
+                      { "stdout_stderr", TerminalCaptureMode::StdoutStderr } })) {
+                spdlog::warn(
+                    "Invalid terminal_capture.mode in {}; using default '{}'",
+                    config_path.string(),
+                    to_string(config.mode));
+            }
+
+            if (capture_json.contains("retention") &&
+                !parse_config_enum(
+                    capture_json.at("retention"),
+                    config.retention,
+                    { { "overwrite", TerminalRetentionMode::Overwrite },
+                      { "append", TerminalRetentionMode::Append },
+                      { "rotate", TerminalRetentionMode::Rotate } })) {
+                spdlog::warn(
+                    "Invalid terminal_capture.retention in {}; using default '{}'",
+                    config_path.string(),
+                    to_string(config.retention));
+            }
+
+            if (capture_json.contains("flush") &&
+                !parse_config_enum(
+                    capture_json.at("flush"),
+                    config.flush,
+                    { { "balanced", TerminalFlushMode::Balanced },
+                      { "realtime", TerminalFlushMode::Realtime },
+                      { "performance", TerminalFlushMode::Performance } })) {
+                spdlog::warn(
+                    "Invalid terminal_capture.flush in {}; using default '{}'",
+                    config_path.string(),
+                    to_string(config.flush));
+            }
+        }
+
+        spdlog::info(
+            "Loaded terminal capture config from {}: mode={}, retention={}, flush={}",
+            config_path.string(),
+            to_string(config.mode),
+            to_string(config.retention),
+            to_string(config.flush));
+    }
+    catch (const std::exception& e) {
+        config = TerminalCaptureConfig{};
+        spdlog::warn(
+            "Failed to parse {}; using defaults: {}",
+            config_path.string(),
+            e.what());
+    }
+
+    return config;
+}
+
+#ifdef _WIN32
+TerminalCaptureConfig g_terminal_capture_config;
+bool g_stdout_captured = false;
+bool g_stderr_captured = false;
+const std::filesystem::path g_stdout_capture_path = "logs/Ruzino.stdout.log";
+const std::filesystem::path g_stderr_capture_path = "logs/Ruzino.stderr.log";
+#endif
+std::unique_ptr<UsdDiagnosticFileDelegate> g_usd_diagnostic_delegate;
+
+#ifdef _WIN32
+void rotate_terminal_file(const std::filesystem::path& path)
+{
+    std::error_code ec;
+    const auto oldest =
+        std::filesystem::path(path.string() + "." +
+                              std::to_string(kTerminalLogMaxFiles));
+    std::filesystem::remove(oldest, ec);
+
+    for (int i = kTerminalLogMaxFiles - 1; i >= 1; --i) {
+        const auto src =
+            std::filesystem::path(path.string() + "." + std::to_string(i));
+        const auto dst =
+            std::filesystem::path(path.string() + "." + std::to_string(i + 1));
+        if (std::filesystem::exists(src, ec)) {
+            std::filesystem::remove(dst, ec);
+            std::filesystem::rename(src, dst, ec);
+        }
+    }
+
+    if (std::filesystem::exists(path, ec)) {
+        const auto rotated = std::filesystem::path(path.string() + ".1");
+        std::filesystem::remove(rotated, ec);
+        std::filesystem::rename(path, rotated, ec);
+    }
+}
+
+void prepare_terminal_log_target(
+    const std::filesystem::path& path,
+    TerminalRetentionMode retention)
+{
+    std::filesystem::create_directories(path.parent_path());
+
+    if (retention != TerminalRetentionMode::Rotate) {
+        return;
+    }
+
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec) &&
+        std::filesystem::file_size(path, ec) >= kTerminalLogMaxSize) {
+        rotate_terminal_file(path);
+    }
+}
+
+void update_standard_handle(FILE* stream)
+{
+    const intptr_t os_handle = _get_osfhandle(_fileno(stream));
+    if (os_handle == -1) {
+        return;
+    }
+
+    if (stream == stdout) {
+        SetStdHandle(STD_OUTPUT_HANDLE, reinterpret_cast<HANDLE>(os_handle));
+    }
+    else if (stream == stderr) {
+        SetStdHandle(STD_ERROR_HANDLE, reinterpret_cast<HANDLE>(os_handle));
+    }
+}
+
+bool capture_terminal_stream(
+    FILE* stream,
+    const std::filesystem::path& path,
+    TerminalRetentionMode retention,
+    TerminalFlushMode flush)
+{
+    prepare_terminal_log_target(path, retention);
+
+    const char* mode = retention == TerminalRetentionMode::Append ? "a" : "w";
+    FILE* reopened = nullptr;
+    if (freopen_s(&reopened, path.string().c_str(), mode, stream) != 0 ||
+        reopened == nullptr) {
+        return false;
+    }
+
+    const int buffer_mode =
+        flush == TerminalFlushMode::Performance ? _IOFBF : _IOLBF;
+    setvbuf(stream, nullptr, buffer_mode, kTerminalStreamBufferSize);
+    update_standard_handle(stream);
+    return true;
+}
+
+void maybe_rotate_captured_stream(
+    FILE* stream,
+    bool enabled,
+    const std::filesystem::path& path)
+{
+    if (!enabled || g_terminal_capture_config.retention !=
+                        TerminalRetentionMode::Rotate) {
+        return;
+    }
+
+    std::fflush(stream);
+
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) ||
+        std::filesystem::file_size(path, ec) < kTerminalLogMaxSize) {
+        return;
+    }
+
+    rotate_terminal_file(path);
+    FILE* reopened = nullptr;
+    if (freopen_s(&reopened, path.string().c_str(), "w", stream) == 0 &&
+        reopened != nullptr) {
+        const int buffer_mode =
+            g_terminal_capture_config.flush == TerminalFlushMode::Performance
+            ? _IOFBF
+            : _IOLBF;
+        setvbuf(stream, nullptr, buffer_mode, kTerminalStreamBufferSize);
+        update_standard_handle(stream);
+    }
+}
+#endif
+
+void flush_terminal_streams()
+{
+    std::fflush(stdout);
+    std::fflush(stderr);
+
+#ifdef _WIN32
+    maybe_rotate_captured_stream(stdout, g_stdout_captured, g_stdout_capture_path);
+    maybe_rotate_captured_stream(stderr, g_stderr_captured, g_stderr_capture_path);
+#endif
+}
+
+void configure_application_logging()
+{
+    namespace fs = std::filesystem;
+
+    fs::create_directories("logs");
+
+#ifdef _DEBUG
+    constexpr auto console_level = spdlog::level::debug;
+#else
+    constexpr auto console_level = spdlog::level::warn;
+#endif
+
+    std::vector<spdlog::sink_ptr> sinks;
+    auto previous_default_logger = spdlog::default_logger();
+    if (previous_default_logger) {
+        sinks = previous_default_logger->sinks();
+    }
+
+    if (sinks.empty()) {
+        sinks.push_back(std::make_shared<spdlog::sinks::stderr_color_sink_mt>());
+    }
+
+    for (auto& sink : sinks) {
+        if (!sink) {
+            continue;
+        }
+        sink->set_level(console_level);
+        sink->set_pattern("%^[%T] %n: %v%$");
+    }
+
+    auto full_log_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+        "logs/Ruzino.log", true);
+    full_log_sink->set_level(spdlog::level::trace);
+    full_log_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
+    sinks.push_back(full_log_sink);
+
+    auto error_log_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+        "logs/Ruzino.error.log", true);
+    error_log_sink->set_level(spdlog::level::warn);
+    error_log_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
+    sinks.push_back(error_log_sink);
+
+    auto logger =
+        std::make_shared<spdlog::logger>("Ruzino", sinks.begin(), sinks.end());
+    logger->set_level(spdlog::level::trace);
+    logger->flush_on(spdlog::level::info);
+
+    spdlog::set_default_logger(logger);
+    spdlog::flush_every(std::chrono::seconds(1));
+    spdlog::info(
+        "Auto-save logging enabled: logs/Ruzino.log and logs/Ruzino.error.log");
+}
+
+void install_usd_diagnostic_logging()
+{
+    if (!g_usd_diagnostic_delegate) {
+        g_usd_diagnostic_delegate = std::make_unique<UsdDiagnosticFileDelegate>();
+        pxr::TfDiagnosticMgr::GetInstance().AddDelegate(
+            g_usd_diagnostic_delegate.get());
+        spdlog::info("Installed OpenUSD diagnostic file delegate");
+    }
+}
+
+void uninstall_usd_diagnostic_logging()
+{
+    if (g_usd_diagnostic_delegate) {
+        pxr::TfDiagnosticMgr::GetInstance().RemoveDelegate(
+            g_usd_diagnostic_delegate.get());
+        g_usd_diagnostic_delegate.reset();
+    }
+}
+
+void configure_terminal_capture(const TerminalCaptureConfig& config)
+{
+#ifdef _WIN32
+    g_terminal_capture_config = config;
+    g_stdout_captured = false;
+    g_stderr_captured = false;
+
+    if (config.mode == TerminalCaptureMode::Disabled) {
+        spdlog::info(
+            "Terminal capture disabled by config: mode={}, retention={}, flush={}",
+            to_string(config.mode),
+            to_string(config.retention),
+            to_string(config.flush));
+        return;
+    }
+
+    if (config.mode == TerminalCaptureMode::Stderr ||
+        config.mode == TerminalCaptureMode::StdoutStderr) {
+        g_stderr_captured = capture_terminal_stream(
+            stderr, g_stderr_capture_path, config.retention, config.flush);
+        if (!g_stderr_captured) {
+            spdlog::warn(
+                "Failed to redirect stderr to {}",
+                g_stderr_capture_path.string());
+        }
+    }
+
+    if (config.mode == TerminalCaptureMode::StdoutStderr) {
+        g_stdout_captured = capture_terminal_stream(
+            stdout, g_stdout_capture_path, config.retention, config.flush);
+        if (!g_stdout_captured) {
+            spdlog::warn(
+                "Failed to redirect stdout to {}",
+                g_stdout_capture_path.string());
+        }
+    }
+
+    spdlog::info(
+        "Terminal capture enabled by config: mode={}, retention={}, flush={}",
+        to_string(config.mode),
+        to_string(config.retention),
+        to_string(config.flush));
+#else
+    (void)config;
+    spdlog::warn("Terminal capture is only implemented on Windows");
+#endif
+}
+}  // namespace
 
 class MaterialXNodeSystem : public NodeSystem {
    public:
@@ -149,12 +657,11 @@ class PythonConsoleWidgetFactory : public IWidgetFactory {
 
 int main(int argc, char* argv[])
 {
-#ifdef _DEBUG
-    spdlog::set_level(spdlog::level::debug);
-#else
-    spdlog::set_level(spdlog::level::warn);
-#endif
-    spdlog::set_pattern("%^[%T] %n: %v%$");
+    configure_application_logging();
+    install_usd_diagnostic_logging();
+    const auto terminal_capture_config = load_terminal_capture_config();
+    configure_terminal_capture(terminal_capture_config);
+    flush_terminal_streams();
     auto window = std::make_unique<Window>();
 
     // Set MaterialX standard library path using USD's TfSetenv (preferred
@@ -198,6 +705,14 @@ int main(int argc, char* argv[])
     std::shared_ptr<UsdviewEngine*> render_bare_ptr =
         std::make_shared<UsdviewEngine*>(render.get());
 
+    window->register_function_before_frame(
+        [render_bare_ptr](Window* window) {
+            (void)window;
+            if (*render_bare_ptr) {
+                (*render_bare_ptr)->ProcessPendingRendererSwitch();
+            }
+        });
+
     render->SetCallBack([render_bare_ptr](
                             Window* window, IWidget* render_widget) {
         auto node_system = static_cast<const std::shared_ptr<NodeSystem>*>(
@@ -209,8 +724,9 @@ int main(int argc, char* argv[])
                 dynamic_cast<UsdviewEngine*>(*render_bare_ptr);
             auto current_renderer = engine->GetCurrentRenderer();
 
-            FileBasedNodeWidgetSettings desc;
+            RendererNodeWidgetSettings desc;
             desc.system = *node_system;
+            desc.widget_name = "Renderer Graph";
             desc.json_path =
                 "../../Assets/" + current_renderer + "/render_nodes_save.json";
 
@@ -264,11 +780,16 @@ int main(int argc, char* argv[])
     // Subscribe to file dialog result events
     window->events().subscribe(
         "file_open_selected", [&stage, &window](const std::string& file_path) {
+            flush_terminal_streams();
             if (stage->OpenStage(file_path)) {
                 spdlog::info("Successfully opened stage: {}", file_path);
                 // Trigger widget recreation
                 window->events().emit("stage_reloaded");
             }
+            else {
+                spdlog::warn("Failed to open stage: {}", file_path);
+            }
+            flush_terminal_streams();
         });
 
     window->events().subscribe(
@@ -279,46 +800,12 @@ int main(int argc, char* argv[])
     window->events().subscribe(
         "stage_reloaded",
         [&stage, &window, render_bare_ptr](const std::string&) {
-            spdlog::info("Stage reloaded, recreating widgets...");
-
-            // Invalidate old render pointer to prevent use-after-free
-            *render_bare_ptr = nullptr;
-
-            // Simply recreate widgets - the old ones will be replaced because
-            // they have the same unique name
-            auto usd_file_viewer = std::make_unique<UsdFileViewer>(stage.get());
-            auto render = std::make_unique<UsdviewEngine>(stage.get());
-
-            // Update the shared pointer to point to new widget
-            *render_bare_ptr = render.get();
-
-            render->SetCallBack(
-                [render_bare_ptr](Window* window, IWidget* render_widget) {
-                    auto node_system =
-                        static_cast<const std::shared_ptr<NodeSystem>*>(
-                            dynamic_cast<UsdviewEngine*>(render_widget)
-                                ->emit_create_renderer_ui_control());
-                    if (node_system) {
-                        UsdviewEngine* engine =
-                            dynamic_cast<UsdviewEngine*>(*render_bare_ptr);
-                        auto current_renderer = engine->GetCurrentRenderer();
-
-                        FileBasedNodeWidgetSettings desc;
-                        desc.system = *node_system;
-                        desc.json_path = "../../Assets/" + current_renderer +
-                                         "/render_nodes_save.json";
-
-                        std::unique_ptr<IWidget> node_widget =
-                            std::move(create_node_imgui_widget(desc));
-
-                        window->register_widget(std::move(node_widget));
-                    }
-                });
-
-            window->register_widget(std::move(render));
-            window->register_widget(std::move(usd_file_viewer));
-
-            spdlog::info("Widgets recreated successfully");
+            flush_terminal_streams();
+            spdlog::info("Stage reloaded; resetting existing render widget");
+            if (*render_bare_ptr) {
+                (*render_bare_ptr)->ReloadStage();
+            }
+            flush_terminal_streams();
         });
 
     // Subscribe to material editor events
@@ -668,12 +1155,6 @@ int main(int argc, char* argv[])
             }
         });
 
-    window->register_function_after_frame([render_bare_ptr](Window* window) {
-        if (*render_bare_ptr) {
-            (*render_bare_ptr)->finish_render();
-        }
-    });
-
     window->register_function_after_frame(
         [&stage](Window* window) { stage->finish_tick(); });
     window->SetMaximized(true);
@@ -687,4 +1168,9 @@ int main(int argc, char* argv[])
 
     window.reset();
     stage.reset();
+
+    uninstall_usd_diagnostic_logging();
+    flush_terminal_streams();
+    spdlog::default_logger()->flush();
+    spdlog::shutdown();
 }

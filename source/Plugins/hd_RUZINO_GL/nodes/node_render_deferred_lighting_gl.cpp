@@ -138,8 +138,8 @@ NODE_EXECUTION_FUNCTION(deferred_lighting)
                     GfMatrix4f(frustum.ComputeProjectionMatrix());
 
                 light_vector.emplace_back(
-                    light_projection_mat,
-                    light_view_mat,
+                    light_projection_mat.GetTranspose(),
+                    light_view_mat.GetTranspose(),
                     position3,
                     radius,
                     diffuse3,
@@ -166,12 +166,12 @@ NODE_EXECUTION_FUNCTION(deferred_lighting)
 
     DestroyFullScreenVAO(VAO, VBO);
 
+    auto shader_error = shader->shader.get_error();
+
     resource_allocator.destroy(shader);
     glDeleteBuffers(1, &lightBuffer);
     glDeleteFramebuffers(1, &framebuffer);
     params.set_output("Color", color_texture);
-
-    auto shader_error = shader->shader.get_error();
     if (!shader_error.empty()) {
         return false;
     }

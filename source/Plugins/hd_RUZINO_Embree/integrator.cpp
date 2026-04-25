@@ -1,6 +1,8 @@
 #include "integrator.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <functional>
 #include <random>
 
@@ -32,6 +34,27 @@ static unsigned channel(VtValue val)
 
     TF_CODING_ERROR("val must can cast to those types");
     return 0;
+}
+
+static GfVec3f _ApplyDisplayTransform(const GfVec3f& color)
+{
+    auto aces = [](float x) -> float {
+        const float a = 2.51f;
+        const float b = 0.03f;
+        const float c = 2.43f;
+        const float d = 0.59f;
+        const float e = 0.14f;
+        return (x * (a * x + b)) / (x * (c * x + d) + e);
+    };
+
+    // Mild HDR clamp to suppress occasional fireflies before tone mapping.
+    GfVec3f mapped = color;
+    for (int i = 0; i < 3; ++i) {
+        mapped[i] = std::clamp(mapped[i], 0.0f, 16.0f) * 2.5f;
+        mapped[i] = std::clamp(aces(mapped[i]), 0.0f, 1.0f);
+        mapped[i] = std::pow(mapped[i], 1.0f / 2.2f);
+    }
+    return mapped;
 }
 /// Fill in an RTCRay structure from the given parameters.
 static void _PopulateRay(
@@ -256,9 +279,19 @@ Color Integrator::EstimateDirectLight(
     auto brdfVal = si.Eval(wi);
     GfVec3f contribution_by_sample_lights{ 0 };
 
-    if (sample_light_pdf > 0.0f &&
-        this->VisibilityTest(
-            si.position + 0.0001f * si.geometricNormal, sampled_light_pos)) {
+    if (sample_light_pdf > 0.0f) {
+        GfVec3f shadowOrigin =
+            si.position +
+            0.001f *
+                (GfDot(si.geometricNormal, wi) >= 0.0f ? si.geometricNormal
+                                                       : -si.geometricNormal);
+
+        GfVec3f shadowTarget = sampled_light_pos - wi * 0.001f;
+
+        if (!this->VisibilityTest(shadowOrigin, shadowTarget)) {
+            return contribution_by_sample_lights;
+        }
+
         contribution_by_sample_lights =
             GfCompMult(sample_light_luminance, brdfVal) *
             abs(GfDot(si.shadingNormal, wi)) / sample_light_pdf;
@@ -317,8 +350,18 @@ VtValue SamplingIntegrator::average_samples(const VtValue& color, unsigned spp)
 
     switch (channel(color)) {
         case 1: ret = VtValue(color.Get<float>() / spp); break;
-        case 3: ret = VtValue(color.Get<GfVec3f>() / spp); break;
-        case 4: ret = VtValue(color.Get<GfVec4f>() / spp); break;
+        case 3: {
+            auto averaged = color.Get<GfVec3f>() / spp;
+            ret = VtValue(_ApplyDisplayTransform(averaged));
+            break;
+        }
+        case 4: {
+            auto averaged = color.Get<GfVec4f>() / spp;
+            auto corrected = _ApplyDisplayTransform(
+                GfVec3f(averaged[0], averaged[1], averaged[2]));
+            ret = VtValue(GfVec4f(corrected[0], corrected[1], corrected[2], averaged[3]));
+            break;
+        }
         default: assert(false);
     }
     return ret;

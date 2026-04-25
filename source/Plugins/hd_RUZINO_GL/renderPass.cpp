@@ -127,8 +127,7 @@ void Hd_RUZINO_RenderPass::_Execute(
         _renderer->MarkAovBuffersUnconverged();
         _renderer->Clear();
         _renderer->Render(nullptr);
-        //needStartRender = false;
-        //_renderThread->StartRender();
+        needStartRender = false;
     }
     
 }

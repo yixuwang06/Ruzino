@@ -10,10 +10,12 @@ RenderGlobalPayload::RenderGlobalPayload()
 RenderGlobalPayload::RenderGlobalPayload(
     std::vector<Hd_RUZINO_Camera*>* cameras,
     std::vector<Hd_RUZINO_Light*>* lights,
+    std::vector<Hd_RUZINO_Mesh*>* meshes,
     pxr::TfHashMap<pxr::SdfPath, Hd_RUZINO_Material*, pxr::TfHash>* materials,
     nvrhi::IDevice* nvrhi_device)
     : cameras(cameras),
       lights(lights),
+      meshes(meshes),
       materials(materials),
       nvrhi_device(nvrhi_device),
       shader_factory(&resource_allocator)
@@ -27,6 +29,7 @@ RenderGlobalPayload::RenderGlobalPayload(
 RenderGlobalPayload::RenderGlobalPayload(const RenderGlobalPayload& rhs)
     : cameras(rhs.cameras),
       lights(rhs.lights),
+      meshes(rhs.meshes),
       materials(rhs.materials),
       nvrhi_device(rhs.nvrhi_device),
       shader_factory(&resource_allocator)

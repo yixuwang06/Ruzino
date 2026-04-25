@@ -6,7 +6,20 @@
 #include <pxr/imaging/hd/driver.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <any>
+#include <cstdio>
+#include <mutex>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 #include "GCore/geom_payload.hpp"
 #include "GUI/window.h"
@@ -14,6 +27,8 @@
 #include "RHI/rhi.hpp"
 #include "free_camera.hpp"
 #include "imgui.h"
+#include "internal/memory/DeviceMemoryPool.hpp"
+#include "nodes/system/node_system.hpp"
 #include "nvrhi/nvrhi.h"
 #include "pxr/base/gf/camera.h"
 #include "pxr/base/gf/frustum.h"
@@ -29,6 +44,7 @@
 #include "pxr/usd/usdGeom/camera.h"
 #include "pxr/usd/usdGeom/xformable.h"
 #include "pxr/usdImaging/usdImagingGL/engine.h"
+#include "stage_listener/stage_listener.h"
 
 RUZINO_NAMESPACE_OPEN_SCOPE
 class NodeTree;
@@ -61,82 +77,211 @@ struct UsdviewEnginePrivateData {
 UsdviewEngine::UsdviewEngine(Stage* stage) : stage_(stage)
 {
     data_ = std::make_unique<UsdviewEnginePrivateData>();
-    // Initialize OpenGL context using WGL
-    CreateGLContext();
-    GarchGLApiLoad();
-    pxr::UsdImagingGLEngine::Parameters params;
-    params.allowAsynchronousSceneProcessing = true;
-
-    hgi = pxr::Hgi::CreateNamedHgi(pxr::HgiTokens->OpenGL);
-    pxr::HdDriver hdDriver;
-    hdDriver.name = pxr::HgiTokens->renderDriver;
-    hdDriver.driver = pxr::VtValue(hgi.get());
-    params.driver = hdDriver;
-
-    renderer_ = std::make_unique<pxr::UsdImagingGLEngine>(params);
-
-    renderer_->SetEnablePresentation(false);
-    free_camera_ = std::make_unique<ThirdPersonCamera>();
-
-    auto prim = pxr::UsdGeomCamera::Get(
-        stage_->get_usd_stage(), pxr::SdfPath("/FreeCamera"));
-    if (prim) {
-        // Load existing camera
-        static_cast<pxr::UsdGeomCamera&>(*free_camera_) = prim;
-        // Load third person camera state
-        auto* third_camera =
-            static_cast<ThirdPersonCamera*>(free_camera_.get());
-        third_camera->LoadState();
-    }
-    else {
-        // Create new camera with all required attributes
-        static_cast<pxr::UsdGeomCamera&>(*free_camera_) =
-            pxr::UsdGeomCamera::Define(
-                stage_->get_usd_stage(), pxr::SdfPath("/FreeCamera"));
-
-        InitializeCameraAttributes(free_camera_.get());
-
-        // Initialize third person camera to look at origin
-        auto* third_camera =
-            static_cast<ThirdPersonCamera*>(free_camera_.get());
-        third_camera->LookAt(pxr::GfVec3d{ 5, 5, 5 }, pxr::GfVec3d{ 0, 0, 0 });
-        third_camera->SaveState();
-    }
-    auto plugins = renderer_->GetRendererPlugins();
-
-    ChooseRenderer(plugins, engine_status.renderer_id);
-
-    // Set selection highlight color to bright orange
-    renderer_->SetSelectionColor(pxr::GfVec4f(1.0f, 0.7f, 0.0f, 1.0f));
+    InitializeFreeCameraFromStage();
+    RecreateRendererEngine();
 }
 
 void UsdviewEngine::ChooseRenderer(
     const pxr::TfTokenVector& available_renderers,
     unsigned i)
 {
-    renderer_->SetRendererPlugin(available_renderers[i]);
-    spdlog::info(
-        "Switching to renderer {}", available_renderers[i].GetString().c_str());
-
-    if (available_renderers[i].GetString() == "Hd_RUZINO_RendererPlugin") {
-        renderer_ui_control =
-            renderer_->GetRendererSetting(pxr::TfToken("RenderNodeSystem"))
-                .Get<const void*>();
+    if (!renderer_ || i >= available_renderers.size()) {
+        spdlog::warn("UsdviewEngine: invalid renderer selection {}", i);
+        return;
     }
 
-    if (available_renderers[i].GetString() == "Hd_RUZINO_GL_RendererPlugin") {
-        renderer_ui_control =
-            renderer_->GetRendererSetting(pxr::TfToken("RenderNodeSystem"))
-                .Get<const void*>();
+    const auto& renderer_token = available_renderers[i];
+    spdlog::info(
+        "UsdviewEngine: queued renderer switch to {}",
+        renderer_token.GetString().c_str());
+    std::fflush(stdout);
+    std::fflush(stderr);
+    pending_renderer_token_ = renderer_token;
+    pending_renderer_id_ = i;
+    pending_renderer_switch_ = true;
+}
+
+void UsdviewEngine::ReloadStage()
+{
+    spdlog::info("UsdviewEngine: reloading stage and resetting renderer state");
+    std::fflush(stdout);
+    std::fflush(stderr);
+
+    renderer_ui_control = nullptr;
+    current_selected_path_ = pxr::SdfPath();
+    cached_camera_pos_ = pxr::GfVec3d(0.0);
+    cached_target_pos_ = pxr::GfVec3d(0.0);
+    camera_state_cached_ = false;
+    first_draw = true;
+    pending_renderer_switch_ = false;
+    engine_status.renderer_id = 0;
+
+    InitializeFreeCameraFromStage();
+    RecreateRendererEngine();
+}
+
+void UsdviewEngine::InitializeFreeCameraFromStage()
+{
+    free_camera_ = std::make_unique<ThirdPersonCamera>();
+
+    auto prim = pxr::UsdGeomCamera::Get(
+        stage_->get_usd_stage(), pxr::SdfPath("/FreeCamera"));
+    if (prim) {
+        static_cast<pxr::UsdGeomCamera&>(*free_camera_) = prim;
+        auto* third_camera =
+            static_cast<ThirdPersonCamera*>(free_camera_.get());
+        third_camera->LoadState();
+    }
+    else {
+        static_cast<pxr::UsdGeomCamera&>(*free_camera_) =
+            pxr::UsdGeomCamera::Define(
+                stage_->get_usd_stage(), pxr::SdfPath("/FreeCamera"));
+
+        InitializeCameraAttributes(free_camera_.get());
+
+        auto* third_camera =
+            static_cast<ThirdPersonCamera*>(free_camera_.get());
+        third_camera->LookAt(pxr::GfVec3d{ 5, 5, 5 }, pxr::GfVec3d{ 0, 0, 0 });
+        third_camera->SaveState();
+    }
+}
+
+void UsdviewEngine::RecreateRendererEngine(const pxr::TfToken* renderer_token)
+{
+    QuiesceAndReleasePresentation();
+
+    CreateGLContext();
+    renderer_.reset();
+    hgi.reset();
+    DestroyGLContext();
+
+    CreateGLContext();
+    GarchGLApiLoad();
+
+    pxr::UsdImagingGLEngine::Parameters params;
+    params.allowAsynchronousSceneProcessing = false;
+
+    hgi = pxr::Hgi::CreatePlatformDefaultHgi();
+    spdlog::info("UsdviewEngine: using platform-default Hgi backend");
+    pxr::HdDriver hdDriver;
+    hdDriver.name = pxr::HgiTokens->renderDriver;
+    hdDriver.driver = pxr::VtValue(hgi.get());
+    params.driver = hdDriver;
+
+    renderer_ = std::make_unique<pxr::UsdImagingGLEngine>(params);
+    renderer_->SetEnablePresentation(false);
+    renderer_->SetSelectionColor(pxr::GfVec4f(1.0f, 0.7f, 0.0f, 1.0f));
+
+    auto available_renderers = renderer_->GetRendererPlugins();
+    if (available_renderers.empty()) {
+        spdlog::error("UsdviewEngine: no renderer plugins available");
+        return;
+    }
+
+    if (renderer_token) {
+        if (!ApplyRendererPlugin(*renderer_token)) {
+            spdlog::warn(
+                "UsdviewEngine: requested renderer {} not found after engine reset, falling back to default",
+                renderer_token->GetString().c_str());
+            engine_status.renderer_id = 0;
+            ApplyRendererPlugin(available_renderers.front());
+        }
+    }
+    else {
+        const unsigned safe_index =
+            std::min<unsigned>(engine_status.renderer_id, available_renderers.size() - 1);
+        engine_status.renderer_id = safe_index;
+        ApplyRendererPlugin(available_renderers[safe_index]);
+    }
+
+    if (render_buffer_size_[0] > 0 && render_buffer_size_[1] > 0) {
+        renderer_->SetRenderBufferSize(render_buffer_size_);
+        renderer_->SetRenderViewport(
+            pxr::GfVec4d{ 0.0,
+                          0.0,
+                          double(render_buffer_size_[0]),
+                          double(render_buffer_size_[1]) });
+    }
+
+    first_draw = true;
+}
+
+bool UsdviewEngine::ProcessPendingRendererSwitch()
+{
+    if (!pending_renderer_switch_) {
+        return false;
+    }
+
+    const auto renderer_token = pending_renderer_token_;
+    pending_renderer_switch_ = false;
+    spdlog::info(
+        "UsdviewEngine: processing deferred renderer switch to {}",
+        renderer_token.GetString().c_str());
+    std::fflush(stdout);
+    std::fflush(stderr);
+    RecreateRendererEngine(&renderer_token);
+    std::fflush(stdout);
+    std::fflush(stderr);
+    return true;
+}
+
+bool UsdviewEngine::ApplyRendererPlugin(const pxr::TfToken& renderer_token)
+{
+    if (!renderer_) {
+        return false;
+    }
+
+    const auto available_renderers = renderer_->GetRendererPlugins();
+    const auto found = std::find(
+        available_renderers.begin(), available_renderers.end(), renderer_token);
+    if (found == available_renderers.end()) {
+        return false;
+    }
+
+    renderer_ui_control = nullptr;
+    if (data_) {
+        data_->nvrhi_texture = nullptr;
+        data_->staging = nullptr;
+    }
+    persistent_texture = nullptr;
+
+    spdlog::info(
+        "UsdviewEngine: calling SetRendererPlugin({})",
+        renderer_token.GetString().c_str());
+    std::fflush(stdout);
+    std::fflush(stderr);
+    if (auto logger = spdlog::default_logger()) {
+        logger->flush();
+    }
+    renderer_->SetRendererPlugin(renderer_token);
+    spdlog::info(
+        "UsdviewEngine: SetRendererPlugin({}) completed",
+        renderer_token.GetString().c_str());
+    std::fflush(stdout);
+    std::fflush(stderr);
+    if (auto logger = spdlog::default_logger()) {
+        logger->flush();
+    }
+
+    if (renderer_token.GetString() == "Hd_RUZINO_RendererPlugin" ||
+        renderer_token.GetString() == "Hd_RUZINO_GL_RendererPlugin") {
+        auto node_system_setting =
+            renderer_->GetRendererSetting(pxr::TfToken("RenderNodeSystem"));
+        if (node_system_setting.IsHolding<const void*>()) {
+            renderer_ui_control = node_system_setting.Get<const void*>();
+        }
+        else {
+            spdlog::warn(
+                "UsdviewEngine: RenderNodeSystem setting unavailable for renderer {}",
+                renderer_token.GetString().c_str());
+        }
     }
 
     renderer_->SetEnablePresentation(false);
-    data_->nvrhi_texture = nullptr;
-
-    this->engine_status.renderer_id = i;
-
-    // Set selection color for the new renderer
+    engine_status.renderer_id = static_cast<unsigned>(
+        std::distance(available_renderers.begin(), found));
     renderer_->SetSelectionColor(pxr::GfVec4f(1.0f, 0.7f, 0.0f, 1.0f));
+    return true;
 }
 
 std::string UsdviewEngine::GetCurrentRenderer() const
@@ -278,18 +423,15 @@ void UsdviewEngine::DrawMenuBar()
         if (ImGui::BeginMenu("Select Renderer")) {
             auto available_renderers = renderer_->GetRendererPlugins();
             for (unsigned i = 0; i < available_renderers.size(); ++i) {
+                const bool renderer_selected = pending_renderer_switch_
+                    ? pending_renderer_id_ == i
+                    : this->engine_status.renderer_id == i;
                 if (ImGui::MenuItem(
                         available_renderers[i].GetText(),
                         0,
-                        this->engine_status.renderer_id == i)) {
+                        renderer_selected)) {
                     if (this->engine_status.renderer_id != i) {
                         ChooseRenderer(available_renderers, i);
-                        renderer_->SetRenderBufferSize(render_buffer_size_);
-                        renderer_->SetRenderViewport(
-                            pxr::GfVec4d{ 0.0,
-                                          0.0,
-                                          double(render_buffer_size_[0]),
-                                          double(render_buffer_size_[1]) });
                     }
                 }
             }
@@ -352,6 +494,13 @@ void UsdviewEngine::DrawMenuBar()
 
 void UsdviewEngine::copy_to_presentation()
 {
+    std::unique_lock<std::mutex> gpu_lock(
+        execution_launch_mutex, std::try_to_lock);
+    if (!gpu_lock.owns_lock()) {
+        spdlog::debug(
+            "UsdviewEngine: copy_to_presentation skipped because GPU lock is busy");
+        return;
+    }
     // Since Hgi and nvrhi vulkan are on different Vulkan instances and we
     // don't
     // want to modify Hgi's external information definition, we need to do a
@@ -400,6 +549,8 @@ void UsdviewEngine::copy_to_presentation()
 
 void UsdviewEngine::OnFrame(float delta_time)
 {
+    CreateGLContext();
+
     if (first_draw) {
         first_draw = false;
         return;
@@ -419,8 +570,6 @@ void UsdviewEngine::OnFrame(float delta_time)
     }
 
     DrawMenuBar();
-
-    auto previous = data_->nvrhi_texture.Get();
 
     using namespace pxr;
 
@@ -519,8 +668,26 @@ void UsdviewEngine::OnFrame(float delta_time)
 
     UsdPrim root = stage_->get_usd_stage()->GetPseudoRoot();
 
+    bool skip_renderer_frame = false;
+    {
+        std::unique_lock<std::mutex> gpu_probe(
+            execution_launch_mutex, std::try_to_lock);
+        if (!gpu_probe.owns_lock()) {
+            skip_renderer_frame = true;
+            spdlog::debug(
+                "UsdviewEngine: skipping renderer_->Render() this frame because GPU lock is busy");
+        }
+    }
+
     // First try is there a hack?
-    renderer_->Render(root, _renderParams);
+    if (!skip_renderer_frame) {
+        spdlog::info("UsdviewEngine: calling renderer_->Render()");
+        renderer_->Render(root, _renderParams);
+        spdlog::info("UsdviewEngine: renderer_->Render() returned");
+        spdlog::info("UsdviewEngine: calling finish_render()");
+        finish_render();
+        spdlog::info("UsdviewEngine: finish_render() returned");
+    }
 
     auto imgui_frame_size =
         ImVec2(render_buffer_size_[0], render_buffer_size_[1]);
@@ -818,7 +985,46 @@ void UsdviewEngine::Animate(float elapsed_time_seconds)
 void UsdviewEngine::CreateGLContext()
 {
 #ifdef _WIN32
-    HDC hdc = GetDC(GetConsoleWindow());
+    if (gl_render_context_) {
+        wglMakeCurrent(
+            static_cast<HDC>(gl_device_context_),
+            static_cast<HGLRC>(gl_render_context_));
+        return;
+    }
+
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    const wchar_t* class_name = L"RuzinoUsdviewHiddenGLContext";
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = instance;
+    wc.lpszClassName = class_name;
+    RegisterClassW(&wc);
+
+    HWND hwnd = CreateWindowExW(
+        0,
+        class_name,
+        L"Ruzino Usdview GL Context",
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        1,
+        1,
+        nullptr,
+        nullptr,
+        instance,
+        nullptr);
+    if (!hwnd) {
+        spdlog::error("UsdviewEngine: failed to create hidden GL window");
+        return;
+    }
+
+    HDC hdc = GetDC(hwnd);
+    if (!hdc) {
+        spdlog::error("UsdviewEngine: failed to get hidden GL window DC");
+        DestroyWindow(hwnd);
+        return;
+    }
+
     PIXELFORMATDESCRIPTOR pfd;
     ZeroMemory(&pfd, sizeof(pfd));
     pfd.nSize = sizeof(pfd);
@@ -828,11 +1034,85 @@ void UsdviewEngine::CreateGLContext()
     pfd.cColorBits = 24;
 
     int pixelFormat = ChoosePixelFormat(hdc, &pfd);
-    SetPixelFormat(hdc, pixelFormat, &pfd);
+    if (pixelFormat == 0 || !SetPixelFormat(hdc, pixelFormat, &pfd)) {
+        spdlog::error("UsdviewEngine: failed to set hidden GL pixel format");
+        ReleaseDC(hwnd, hdc);
+        DestroyWindow(hwnd);
+        return;
+    }
 
     HGLRC hglrc = wglCreateContext(hdc);
-    wglMakeCurrent(hdc, hglrc);
+    if (!hglrc || !wglMakeCurrent(hdc, hglrc)) {
+        spdlog::error("UsdviewEngine: failed to create/make current WGL context");
+        if (hglrc) {
+            wglDeleteContext(hglrc);
+        }
+        ReleaseDC(hwnd, hdc);
+        DestroyWindow(hwnd);
+        return;
+    }
+
+    gl_window_handle_ = hwnd;
+    gl_device_context_ = hdc;
+    gl_render_context_ = hglrc;
+    spdlog::info("UsdviewEngine: hidden WGL context created");
 #endif
+}
+
+void UsdviewEngine::DestroyGLContext()
+{
+#ifdef _WIN32
+    auto hglrc = static_cast<HGLRC>(gl_render_context_);
+    auto hdc = static_cast<HDC>(gl_device_context_);
+    auto hwnd = static_cast<HWND>(gl_window_handle_);
+
+    if (hglrc) {
+        if (wglGetCurrentContext() == hglrc) {
+            wglMakeCurrent(nullptr, nullptr);
+        }
+        wglDeleteContext(hglrc);
+    }
+    if (hwnd && hdc) {
+        ReleaseDC(hwnd, hdc);
+    }
+    if (hwnd) {
+        DestroyWindow(hwnd);
+    }
+
+    gl_render_context_ = nullptr;
+    gl_device_context_ = nullptr;
+    gl_window_handle_ = nullptr;
+#endif
+}
+
+void UsdviewEngine::QuiesceAndReleasePresentation()
+{
+    renderer_ui_control = nullptr;
+    persistent_texture = nullptr;
+    if (data_) {
+        data_->nvrhi_texture = nullptr;
+        data_->staging = nullptr;
+    }
+
+    if (!renderer_) {
+        return;
+    }
+
+#ifdef _WIN32
+    if (gl_render_context_) {
+        wglMakeCurrent(
+            static_cast<HDC>(gl_device_context_),
+            static_cast<HGLRC>(gl_render_context_));
+    }
+#endif
+
+    renderer_->SetEnablePresentation(false);
+    renderer_->StopRenderer();
+
+    if (RHI::get_device()) {
+        RHI::get_device()->waitForIdle();
+        RHI::get_device()->runGarbageCollection();
+    }
 }
 
 UsdviewEngine::~UsdviewEngine()
@@ -857,15 +1137,29 @@ UsdviewEngine::~UsdviewEngine()
         third_camera->SaveState();
     }
 
+    QuiesceAndReleasePresentation();
     command_list_ = nullptr;
-    data_.reset();
     assert(RHI::get_device());
+#ifdef _WIN32
+    if (gl_render_context_) {
+        wglMakeCurrent(
+            static_cast<HDC>(gl_device_context_),
+            static_cast<HGLRC>(gl_render_context_));
+    }
+#endif
+    if (renderer_) {
+        renderer_->StopRenderer();
+    }
     renderer_.reset();
     hgi.reset();
+    data_.reset();
+    DestroyGLContext();
 }
 
 bool UsdviewEngine::BuildUI()
 {
+    CreateGLContext();
+
     // Initialize ImGuizmo for this frame
     ImGuizmo::BeginFrame();
 
@@ -874,6 +1168,10 @@ bool UsdviewEngine::BuildUI()
 
     // Subscribe to camera transform modification events
     subscribe_to_camera_transform_events();
+
+    // Poll any USD stage edits (transform/material/light/attribute changes)
+    // and request a fresh render when the stage listener reports dirtiness.
+    poll_stage_listener_changes();
 
     auto delta_time = ImGui::GetIO().DeltaTime;
 
@@ -922,39 +1220,46 @@ void UsdviewEngine::finish_render()
         return;
     }
 
-    renderer_->StopRenderer();
+    spdlog::info("UsdviewEngine: finish_render begin");
+    auto* device = RHI::get_device();
     auto hacked_handle =
         renderer_->GetRendererSetting(pxr::TfToken("VulkanColorAov"));
 
     if (hacked_handle.IsHolding<const void*>()) {
+        spdlog::info("UsdviewEngine: finish_render using VulkanColorAov direct path");
         auto rendered = *reinterpret_cast<const nvrhi::TextureHandle*>(
             hacked_handle.Get<const void*>());
         if (rendered) {
             if (!command_list_) {
                 command_list_ = RHI::get_device()->createCommandList();
             }
+            spdlog::info("UsdviewEngine: finish_render copying presented texture");
+            std::unique_lock<std::mutex> gpu_lock(
+                execution_launch_mutex, std::try_to_lock);
+            if (!gpu_lock.owns_lock()) {
+                spdlog::debug(
+                    "UsdviewEngine: finish_render skipped direct texture copy because GPU lock is busy");
+                return;
+            }
             RHI::copy_from_texture(
                 data_->nvrhi_texture, rendered, command_list_.Get());
+            spdlog::info("UsdviewEngine: finish_render copy_from_texture returned");
         }
-        RHI::get_device()->waitForIdle();
-        RHI::get_device()->runGarbageCollection();
+        if (device) {
+            spdlog::info("UsdviewEngine: finish_render waiting for idle after copy");
+            device->waitForIdle();
+            spdlog::info("UsdviewEngine: finish_render waitForIdle after copy returned");
+            device->runGarbageCollection();
+            spdlog::info("UsdviewEngine: finish_render runGarbageCollection returned");
+        }
     }
     else {
+        spdlog::info("UsdviewEngine: finish_render using copy_to_presentation fallback");
         copy_to_presentation();
+        spdlog::info("UsdviewEngine: finish_render copy_to_presentation returned");
     }
 
-    // Also retrieve TLAS if needed
-    auto tlas_handle =
-        renderer_->GetRendererSetting(pxr::TfToken("VulkanTLAS"));
-    if (tlas_handle.IsHolding<const void*>()) {
-        auto tlas_ptr = tlas_handle.Get<const void*>();
-        auto tlas =
-            static_cast<nvrhi::rt::IAccelStruct*>(const_cast<void*>(tlas_ptr));
-        // TLAS can now be used here if needed
-        if (tlas) {
-            spdlog::debug("Successfully retrieved TLAS from renderer");
-        }
-    }
+    spdlog::info("UsdviewEngine: finish_render end");
 }
 
 ImGuiWindowFlags UsdviewEngine::GetWindowFlag()
@@ -1092,6 +1397,53 @@ void UsdviewEngine::on_camera_transform_modified()
             cached_target_pos_ = third_camera->GetTargetPosition();
             camera_state_cached_ = true;
         }
+    }
+
+    request_renderer_refresh();
+}
+
+void UsdviewEngine::request_renderer_refresh()
+{
+    if (!renderer_) {
+        return;
+    }
+
+    auto value = renderer_->GetRendererSetting(pxr::TfToken("RenderNodeSystem"));
+    if (!value.IsHolding<const void*>()) {
+        return;
+    }
+
+    auto ptr = value.Get<const void*>();
+    if (!ptr) {
+        return;
+    }
+
+    auto node_system_shared =
+        *static_cast<const std::shared_ptr<NodeSystem>*>(ptr);
+    if (!node_system_shared) {
+        return;
+    }
+
+    if (auto* tree = node_system_shared->get_node_tree()) {
+        tree->SetDirty(true);
+    }
+}
+
+void UsdviewEngine::poll_stage_listener_changes()
+{
+    if (!stage_) {
+        return;
+    }
+
+    auto* listener = stage_->get_stage_listener();
+    if (!listener) {
+        return;
+    }
+
+    StageListener::DirtyPathSet dirty_paths;
+    listener->GetDirtyPaths(dirty_paths);
+    if (!dirty_paths.empty()) {
+        request_renderer_refresh();
     }
 }
 

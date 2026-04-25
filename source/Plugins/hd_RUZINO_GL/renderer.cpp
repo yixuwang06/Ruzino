@@ -100,7 +100,6 @@ void Hd_RUZINO_Renderer::Clear()
         auto rb = static_cast<Hd_RUZINO_RenderBufferGL*>(
             _aovBindings[i].renderBuffer);
 
-        rb->Map();
         if (_aovNames[i].name == HdAovTokens->color) {
             GfVec4f clearColor = _GetClearColor(_aovBindings[i].clearValue);
 
@@ -119,7 +118,6 @@ void Hd_RUZINO_Renderer::Clear()
             rb->Clear(clearValue.data());
         }  // else, _ValidateAovBindings would have already warned.
 
-        rb->Unmap();
         rb->SetConverged(false);
     }
 }

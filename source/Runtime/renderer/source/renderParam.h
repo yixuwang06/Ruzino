@@ -22,6 +22,7 @@
 // language governing permissions and limitations under the Apache License.
 //
 #pragma once
+#include <mutex>
 #include <future>
 #include <map>
 #include <string>
@@ -87,7 +88,9 @@ class Hd_RUZINO_RenderParam final : public HdRenderParam {
 
     // Support multiple named output textures from present nodes
     std::map<std::string, nvrhi::TextureHandle> presented_textures;
-    
+    mutable std::mutex presented_textures_mutex;
+    nvrhi::TextureHandle current_present_texture;
+     
     // Legacy: name of default texture in presented_textures (for backward compatibility)
     // This avoids duplication - just stores which texture is the default one
     std::string default_texture_name;

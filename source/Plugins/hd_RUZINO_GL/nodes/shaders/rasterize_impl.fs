@@ -56,6 +56,11 @@ void main() {
     bitangent = normalize(bitangent - dot(bitangent, geometricNormal) * geometricNormal -
                           dot(bitangent, tangent) * tangent);
 
-    mat3 tbn = mat3(tangent, bitangent, geometricNormal);
-    normal = normalize(tbn * normalize(normalmap_value));
+    if (length(normalmap_value.xy) < 1E-5 && normalmap_value.z > 0.9999) {
+        // Flat/default normal map should preserve the interpolated geometry normal.
+        normal = geometricNormal;
+    } else {
+        mat3 tbn = mat3(tangent, bitangent, geometricNormal);
+        normal = normalize(tbn * normalize(normalmap_value));
+    }
 }

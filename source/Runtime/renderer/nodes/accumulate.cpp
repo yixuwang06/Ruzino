@@ -11,6 +11,7 @@ struct AccumulateStorage {
 
     int current_spp = 0;
     nvrhi::TextureHandle accumulated;
+    nvrhi::TextureHandle cached_input_texture;
 
     PlanarViewConstants old_constants;
     pxr::GfVec2i image_size = pxr::GfVec2i(-1, -1);
@@ -100,11 +101,13 @@ NODE_EXECUTION_FUNCTION(accumulate)
         storage.current_spp = 0;
     }
 
-    bool any_change = view_changed || size_changed;
+    bool texture_changed = (storage.cached_input_texture != texture);
+    bool any_change = view_changed || size_changed || texture_changed;
 
     // Rebuild cached resources only when necessary
     if (any_change || !storage.cached_program_vars ||
         !storage.cached_compute_context) {
+        storage.cached_input_texture = texture;
         storage.cached_program_vars = std::make_unique<ProgramVars>(
             resource_allocator, storage.cached_program);
 

@@ -145,7 +145,7 @@ void Hd_RUZINO_RenderDelegate::_Initialize()
     nvrhi_device = RHI::get_device();
 
     RenderGlobalPayload global_payload =
-        RenderGlobalPayload(&cameras, &lights, &materials, nvrhi_device);
+        RenderGlobalPayload(&cameras, &lights, &meshes, &materials, nvrhi_device);
 
     std::unique_ptr<NodeTreeExecutor> render_executor =
         std::make_unique<EagerNodeTreeExecutorRender>();
@@ -263,6 +263,11 @@ HdAovDescriptor Hd_RUZINO_RenderDelegate::GetDefaultAovDescriptor(
 
 Hd_RUZINO_RenderDelegate::~Hd_RUZINO_RenderDelegate()
 {
+    if (_renderThread.IsThreadRunning()) {
+        _renderThread.StopRender();
+        _renderThread.StopThread();
+    }
+
     // Clean up GPU Scene Assembler before destroying other resources
     GPUSceneAssember::destroy_instance();
     spdlog::info("GPU Scene Assembler destroyed");
@@ -305,6 +310,7 @@ HdResourceRegistrySharedPtr Hd_RUZINO_RenderDelegate::GetResourceRegistry()
 
 void Hd_RUZINO_RenderDelegate::CommitResources(HdChangeTracker* tracker)
 {
+    spdlog::info("Hd_RUZINO_RenderDelegate::CommitResources");
 }
 
 HdRenderPassSharedPtr Hd_RUZINO_RenderDelegate::CreateRenderPass(
@@ -572,16 +578,14 @@ VtValue Hd_RUZINO_RenderDelegate::GetRenderSetting(TfToken const& key) const
         return VtValue(reinterpret_cast<const void*>(&node_system));
     }
 
+
 #ifdef RUZINO_DIRECT_VK_DISPLAY
     if (key == TfToken("VulkanColorAov")) {
         // Legacy: return default texture for backward compatibility
-        if (!_renderParam->default_texture_name.empty()) {
-            auto it = _renderParam->presented_textures.find(
-                _renderParam->default_texture_name);
-            if (it != _renderParam->presented_textures.end() && it->second) {
-                // Safe: map element addresses are stable until erase/rehash
-                return VtValue(reinterpret_cast<const void*>(&it->second));
-            }
+        std::scoped_lock lock(_renderParam->presented_textures_mutex);
+        if (_renderParam->current_present_texture) {
+            return VtValue(reinterpret_cast<const void*>(
+                &_renderParam->current_present_texture));
         }
     }
 
@@ -591,6 +595,7 @@ VtValue Hd_RUZINO_RenderDelegate::GetRenderSetting(TfToken const& key) const
     if (key_str.rfind("VulkanColorAov:", 0) == 0) {
         std::string texture_name =
             key_str.substr(15);  // Skip "VulkanColorAov:"
+        std::scoped_lock lock(_renderParam->presented_textures_mutex);
         auto it = _renderParam->presented_textures.find(texture_name);
         if (it != _renderParam->presented_textures.end()) {
             if (it->second) {
@@ -679,15 +684,21 @@ void Hd_RUZINO_RenderDelegate::SetRenderSetting(
 
 bool Hd_RUZINO_RenderDelegate::Stop(bool blocking)
 {
+    spdlog::info(
+        "Hd_RUZINO_RenderDelegate::Stop blocking={}",
+        blocking);
     _renderThread.StopRender();
+    spdlog::info("Hd_RUZINO_RenderDelegate::Stop after StopRender");
     return HdRenderDelegate::Stop(blocking);
 }
 bool Hd_RUZINO_RenderDelegate::IsParallelSyncEnabled(
     const TfToken& primType) const
 {
-    // if (primType == HdPrimTypeTokens->material)
-    //     return true;
-    return HdRenderDelegate::IsParallelSyncEnabled(primType);
+    // The runtime renderer mutates shared GPU pools, MaterialX shared
+    // documents, and global execution locks during Sync(). Keep Hydra Sync
+    // serialized until those paths are made fully thread-safe.
+    (void)primType;
+    return false;
 }
 
 RUZINO_NAMESPACE_CLOSE_SCOPE
