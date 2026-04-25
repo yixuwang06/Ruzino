@@ -3,6 +3,7 @@
 
 #include "camera.h"
 #include "color.h"
+#include "config.h"
 #include "embree4/rtcore_geometry.h"
 #include "pxr/base/gf/rect2i.h"
 #include "pxr/imaging/hd/renderThread.h"
@@ -75,13 +76,13 @@ class SamplingIntegrator : public Integrator {
         const Hd_RUZINO_Camera* camera,
         Hd_RUZINO_RenderBuffer* render_buffer,
         HdRenderThread* render_thread)
-        : Integrator(camera, render_buffer, render_thread)
+        : Integrator(camera, render_buffer, render_thread),
+          spp(Hd_RUZINO_Config::GetInstance().samplesToConvergence)
     {
     }
 
    protected:
     unsigned spp = 64;
-//    unsigned spp = 4;
 
     void _writeBuffer(unsigned x, unsigned y, VtValue color);
 

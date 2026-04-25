@@ -1,6 +1,7 @@
 #define _SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING
 
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -31,7 +32,9 @@
 #include "pxr/base/gf/camera.h"
 #include "pxr/base/gf/frustum.h"
 #include "pxr/imaging/hd/driver.h"
+#include "pxr/imaging/hd/renderBuffer.h"
 #include "pxr/imaging/hd/tokens.h"
+#include "pxr/imaging/hd/types.h"
 #include "pxr/imaging/hdx/tokens.h"
 #include "pxr/imaging/hgi/tokens.h"
 #include "pxr/usdImaging/usdImagingGL/engine.h"
@@ -66,6 +69,16 @@ HgiFormat ConvertNvrhiFormatToHgiFormatForHeadlessSave(nvrhi::Format format)
         case nvrhi::Format::RGBA16_FLOAT: return HgiFormatFloat16Vec4;
         case nvrhi::Format::RGBA8_UNORM: return HgiFormatUNorm8Vec4;
         case nvrhi::Format::SRGBA8_UNORM: return HgiFormatUNorm8Vec4srgb;
+        default: return HgiFormatInvalid;
+    }
+}
+
+HgiFormat ConvertHdFormatToHgiFormatForHeadlessSave(HdFormat format)
+{
+    switch (format) {
+        case HdFormatUNorm8Vec4: return HgiFormatUNorm8Vec4;
+        case HdFormatFloat32Vec3: return HgiFormatFloat32Vec3;
+        case HdFormatFloat32Vec4: return HgiFormatFloat32Vec4;
         default: return HgiFormatInvalid;
     }
 }
@@ -188,6 +201,68 @@ bool ReadTextureFromRenderNodeSystem(
     return false;
 }
 
+bool ReadEmbreeRenderBuffer(
+    UsdImagingGLEngine* renderer,
+    int width,
+    int height,
+    std::vector<uint8_t>& texture_data,
+    HgiFormat& texture_format)
+{
+    auto value =
+        renderer->GetRendererSetting(pxr::TfToken("EmbreeColorAovRenderBuffer"));
+    if (!value.IsHolding<const void*>()) {
+        spdlog::warn("EmbreeColorAovRenderBuffer renderer setting is unavailable");
+        return false;
+    }
+
+    auto* render_buffer =
+        reinterpret_cast<HdRenderBuffer*>(const_cast<void*>(value.Get<const void*>()));
+    if (!render_buffer) {
+        spdlog::warn("EmbreeColorAovRenderBuffer renderer setting returned null");
+        return false;
+    }
+
+    if (render_buffer->GetWidth() != width ||
+        render_buffer->GetHeight() != height) {
+        spdlog::warn(
+            "Embree color render buffer size mismatch: expected {}x{}, got {}x{}",
+            width,
+            height,
+            render_buffer->GetWidth(),
+            render_buffer->GetHeight());
+        return false;
+    }
+
+    const HdFormat hd_format = render_buffer->GetFormat();
+    texture_format = ConvertHdFormatToHgiFormatForHeadlessSave(hd_format);
+    if (texture_format == HgiFormatInvalid) {
+        spdlog::warn(
+            "Unsupported Embree color render buffer HdFormat={}",
+            static_cast<int>(hd_format));
+        return false;
+    }
+
+    render_buffer->Resolve();
+    void* mapped = render_buffer->Map();
+    if (!mapped) {
+        spdlog::warn("Failed to map Embree color render buffer");
+        return false;
+    }
+
+    const size_t buffer_size = static_cast<size_t>(render_buffer->GetWidth()) *
+                               static_cast<size_t>(render_buffer->GetHeight()) *
+                               HdDataSizeOfFormat(hd_format);
+    texture_data.resize(buffer_size);
+    memcpy(texture_data.data(), mapped, buffer_size);
+    render_buffer->Unmap();
+
+    spdlog::info(
+        "Recovered texture from Embree render buffer (HdFormat={}, bytes={})",
+        static_cast<int>(hd_format),
+        buffer_size);
+    return true;
+}
+
 bool HasPublishedVulkanColorAov(UsdImagingGLEngine* renderer)
 {
     auto hacked_handle = renderer->GetRendererSetting(pxr::TfToken("VulkanColorAov"));
@@ -286,6 +361,8 @@ int main(int argc, char* argv[])
     // CLI-facing spp argument used by headless validation.
     pxr::TfSetenv(
         "Hd_RUZINO_SAMPLES_TO_CONVERGENCE", std::to_string(std::max(1, spp)).c_str());
+    pxr::TfSetenv(
+        "HDEMBREE_SAMPLES_TO_CONVERGENCE", std::to_string(std::max(1, spp)).c_str());
 
     // Validate input files
     if (!std::filesystem::exists(usd_file)) {
@@ -376,8 +453,13 @@ int main(int argc, char* argv[])
         bool is_ruzino_renderer =
             (available_renderers[selected_renderer].GetString() ==
              "Hd_RUZINO_RendererPlugin");
+        bool is_ruzino_embree_renderer =
+            (available_renderers[selected_renderer].GetString() ==
+             "Hd_RUZINO_Embree_RendererPlugin");
         bool is_storm_renderer =
             (selected_renderer == 0 && !is_ruzino_renderer);
+        bool needs_convergence_wait =
+            is_ruzino_renderer || is_ruzino_embree_renderer;
 
         renderer->SetEnablePresentation(false);
 
@@ -503,19 +585,23 @@ int main(int argc, char* argv[])
 
                 renderer->Render(root, render_params);
 
-                if (is_ruzino_renderer) {
+                if (needs_convergence_wait) {
                     constexpr auto kPollInterval =
                         std::chrono::milliseconds(10);
                     constexpr auto kRenderTimeout =
                         std::chrono::seconds(60);
                     auto wait_start = std::chrono::steady_clock::now();
 
-                    while (!renderer->IsConverged() &&
-                           !HasPublishedVulkanColorAov(renderer.get())) {
+                    bool saw_published_texture = false;
+                    while (!renderer->IsConverged()) {
+                        saw_published_texture =
+                            saw_published_texture ||
+                            HasPublishedVulkanColorAov(renderer.get());
                         if (std::chrono::steady_clock::now() - wait_start >
                             kRenderTimeout) {
                             spdlog::warn(
-                                "headless_render timed out waiting for convergence or a published VulkanColorAov texture");
+                                "headless_render timed out waiting for convergence (published_texture_seen={})",
+                                saw_published_texture);
                             break;
                         }
                         std::this_thread::sleep_for(kPollInterval);
@@ -680,8 +766,16 @@ int main(int argc, char* argv[])
                 }
             }
 
-            bool success = ReadTextureDirectly(
-                renderer.get(), width, height, texture_data);
+            bool success = false;
+            if (is_ruzino_embree_renderer) {
+                success = ReadEmbreeRenderBuffer(
+                    renderer.get(), width, height, texture_data, texture_format);
+            }
+
+            if (!success) {
+                success = ReadTextureDirectly(
+                    renderer.get(), width, height, texture_data);
+            }
 
             if (!success) {
                 success = ReadTextureCPU(

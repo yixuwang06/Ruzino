@@ -42,7 +42,6 @@ struct HW7PathTracingStorage {
     int cached_max_depth = -1;
     int cached_rr_start_depth = -1;
     float cached_rr_floor = -1.0f;
-    int cached_debug_view = -1;
 
     ~HW7PathTracingStorage()
     {
@@ -73,7 +72,6 @@ NODE_DECLARATION_FUNCTION(hw7_path_tracing)
     b.add_input<int>("Max Depth").min(1).max(32).default_val(8);
     b.add_input<int>("RR Start Depth").min(1).max(16).default_val(3);
     b.add_input<float>("RR Floor").min(0.01f).max(1.0f).default_val(0.1f);
-    b.add_input<int>("Debug View").min(0).max(3).default_val(0);
 
     b.add_output<nvrhi::TextureHandle>("Output");
 }
@@ -84,7 +82,6 @@ struct HW7PathTracingConstants {
     uint32_t maxDepth;
     uint32_t rrStartDepth;
     float rrProbFloor;
-    uint32_t debugView;
 };
 
 NODE_EXECUTION_FUNCTION(hw7_path_tracing)
@@ -97,8 +94,6 @@ NODE_EXECUTION_FUNCTION(hw7_path_tracing)
     constexpr int kMaxRRStartDepth = 16;
     constexpr float kMinRRFloor = 0.01f;
     constexpr float kMaxRRFloor = 1.0f;
-    constexpr int kMinDebugView = 0;
-    constexpr int kMaxDebugView = 3;
 
     auto& g = global_payload;
     auto geom_dirty =
@@ -133,7 +128,6 @@ NODE_EXECUTION_FUNCTION(hw7_path_tracing)
     int requested_max_depth = params.get_input<int>("Max Depth");
     int requested_rr_start_depth = params.get_input<int>("RR Start Depth");
     float requested_rr_floor = params.get_input<float>("RR Floor");
-    int requested_debug_view = params.get_input<int>("Debug View");
 
     // UI input ranges are enforced interactively, but saved node graphs can
     // still carry stale or out-of-range values.
@@ -144,30 +138,24 @@ NODE_EXECUTION_FUNCTION(hw7_path_tracing)
         std::min(kMaxRRStartDepth, max_depth));
     float rr_floor =
         std::clamp(requested_rr_floor, kMinRRFloor, kMaxRRFloor);
-    int debug_view =
-        std::clamp(requested_debug_view, kMinDebugView, kMaxDebugView);
 
     if (requested_max_depth != max_depth ||
         requested_rr_start_depth != rr_start_depth ||
-        requested_rr_floor != rr_floor ||
-        requested_debug_view != debug_view) {
+        requested_rr_floor != rr_floor) {
         spdlog::warn(
-            "HW7 path tracing clamped settings: depth {}->{} rr_start {}->{} rr_floor {}->{} debug_view {}->{}",
+            "HW7 path tracing clamped settings: depth {}->{} rr_start {}->{} rr_floor {}->{}",
             requested_max_depth,
             max_depth,
             requested_rr_start_depth,
             rr_start_depth,
             requested_rr_floor,
-            rr_floor,
-            requested_debug_view,
-            debug_view);
+            rr_floor);
     }
 
     bool settings_changed =
         storage.cached_max_depth != max_depth ||
         storage.cached_rr_start_depth != rr_start_depth ||
-        storage.cached_rr_floor != rr_floor ||
-        storage.cached_debug_view != debug_view;
+        storage.cached_rr_floor != rr_floor;
 
     if (mat_dirty || !storage.program) {
         ProgramDesc program_desc;
@@ -261,7 +249,6 @@ void fetch_)" + material.second->GetMaterialName() +
         storage.cached_max_depth = max_depth;
         storage.cached_rr_start_depth = rr_start_depth;
         storage.cached_rr_floor = rr_floor;
-        storage.cached_debug_view = debug_view;
 
         spdlog::info(
             "HW7 path tracing rebuilding bindings (geom_dirty={}, mat_dirty={}, light_dirty={}, size_changed={}, settings_changed={})",
@@ -271,11 +258,10 @@ void fetch_)" + material.second->GetMaterialName() +
             size_changed,
             settings_changed);
         spdlog::info(
-            "HW7 path tracing settings: max_depth={} rr_start_depth={} rr_floor={} debug_view={}",
+            "HW7 path tracing settings: max_depth={} rr_start_depth={} rr_floor={}",
             max_depth,
             rr_start_depth,
-            rr_floor,
-            debug_view);
+            rr_floor);
 
         spdlog::info("HW7 path tracing: creating ProgramVars");
         storage.cached_program_vars = std::make_unique<ProgramVars>(
@@ -337,8 +323,7 @@ void fetch_)" + material.second->GetMaterialName() +
                 3 + storage.custom_shader_eval_indices.size()),
             static_cast<uint32_t>(max_depth),
             static_cast<uint32_t>(rr_start_depth),
-            rr_floor,
-            static_cast<uint32_t>(debug_view)
+            rr_floor
         };
 
         if (storage.constants_buffer) {

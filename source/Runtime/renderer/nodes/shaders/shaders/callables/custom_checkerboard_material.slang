@@ -25,8 +25,6 @@ void eval_custom_checkerboard_material(inout EvalCallableData data)
 
     // Lambertian BRDF evaluation
     data.color = Spectrum(baseColor / 3.14159265359);
-    data.lightPdf =
-        max(0.0, dot(data.vertexInfo.normalW, data.L)) / 3.14159265359;
 
     // Sample next direction using cosine-weighted hemisphere sampling
     data.sampledDir =

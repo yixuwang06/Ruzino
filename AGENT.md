@@ -12,6 +12,19 @@
 
 ## Verification
 - Run the narrowest relevant build, test, or check for the code you changed.
+- On Windows, enter `build`, then run:
+  - `$vsPath = & (Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe") -property installationPath`
+  - `Import-Module (Join-Path $vsPath "Common7\Tools\Microsoft.VisualStudio.DevShell.dll")`
+  - `Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation`
+  - `cmake .. -G Ninja`
+  - `ninja`
+- `scripts/build_windows_ninja.ps1` is a direct wrapper around the same sequence.
+- This build must be launched in a real foreground PowerShell window. Do not run it only through a background or tool-hosted shell, because that mode may hang or miss the environment that the framework expects.
+- Do not modify, simplify, reorder, or replace this build command sequence.
+- Always run the full build here. Do not change it to a partial, incremental, target-only, or otherwise reduced compile flow.
+- That script only adds two behaviors around the original six build commands: it writes all output to `build/build_windows_ninja.log`, and it exits the foreground terminal automatically after the run finishes.
+- That script overwrites `build/build_windows_ninja.log` on each run.
+- When launched as a standalone `powershell -File ...` process, it exits automatically after the run finishes.
 - If you could not verify something, say so explicitly.
 - Report failures faithfully. Do not claim success without checking.
 

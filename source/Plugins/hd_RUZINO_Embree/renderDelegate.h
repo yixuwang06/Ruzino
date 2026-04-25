@@ -77,6 +77,7 @@ class Hd_RUZINO_RenderDelegate final : public HdRenderDelegate {
     void CommitResources(HdChangeTracker* tracker) override;
 
     HdRenderParam* GetRenderParam() const override;
+    VtValue GetRenderSetting(const TfToken& key) const override;
 
    private:
     static const TfTokenVector SUPPORTED_RPRIM_TYPES;

@@ -171,6 +171,18 @@ void Hd_RUZINO_Renderer::renderTimeUpdateCamera(const HdRenderPassStateSharedPtr
     camera_->update(renderPassState);
 }
 
+Hd_RUZINO_RenderBuffer* Hd_RUZINO_Renderer::GetColorRenderBuffer() const
+{
+    for (size_t i = 0; i < _aovBindings.size(); ++i) {
+        if (_aovNames[i].name == HdAovTokens->color &&
+            _aovBindings[i].renderBuffer) {
+            return static_cast<Hd_RUZINO_RenderBuffer*>(
+                _aovBindings[i].renderBuffer);
+        }
+    }
+    return nullptr;
+}
+
 bool Hd_RUZINO_Renderer::_ValidateAovBindings()
 {
     if (!_aovBindingsNeedValidation) {

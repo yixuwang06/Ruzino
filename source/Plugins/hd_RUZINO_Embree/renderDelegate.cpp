@@ -373,4 +373,13 @@ HdRenderParam* Hd_RUZINO_RenderDelegate::GetRenderParam() const
     return _renderParam.get();
 }
 
+VtValue Hd_RUZINO_RenderDelegate::GetRenderSetting(TfToken const& key) const
+{
+    if (key == TfToken("EmbreeColorAovRenderBuffer")) {
+        return VtValue(
+            static_cast<const void*>(_renderer->GetColorRenderBuffer()));
+    }
+    return HdRenderDelegate::GetRenderSetting(key);
+}
+
 RUZINO_NAMESPACE_CLOSE_SCOPE

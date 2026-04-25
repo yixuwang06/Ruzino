@@ -8,6 +8,7 @@
 #include "renderer.h"
 RUZINO_NAMESPACE_OPEN_SCOPE
 class Hd_RUZINO_RenderParam;
+class Hd_RUZINO_RenderBuffer;
 using namespace pxr;
 class Hd_RUZINO_Renderer {
    public:
@@ -22,6 +23,7 @@ class Hd_RUZINO_Renderer {
     void MarkAovBuffersUnconverged();
 
     void renderTimeUpdateCamera(const HdRenderPassStateSharedPtr& renderPassState);
+    Hd_RUZINO_RenderBuffer* GetColorRenderBuffer() const;
 
    protected:
     void _RenderTiles(HdRenderThread* renderThread, size_t tileStart, size_t tileEnd);
