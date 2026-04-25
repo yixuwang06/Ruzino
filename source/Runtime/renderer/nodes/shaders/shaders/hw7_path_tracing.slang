@@ -24,6 +24,7 @@ struct HW7PathTracingConstants {
     uint maxDepth;
     uint rrStartDepth;
     float rrProbFloor;
+    uint debugView;
 };
 
 struct RayPayload {
@@ -141,6 +142,12 @@ void RayGen()
         float lightWeight = 0.0f;
         bool lightVisible = false;
 
+        if (hw7Constants.debugView == 1 && depth == 0) {
+            output[pixel] = float4(abs(vertex.normalW), 1.0f);
+            random_seeds[launchIndex] = seed;
+            return;
+        }
+
         LightData rectLight;
         if (find_rect_light(rectLight)) {
             float2 lightXi = random_float2(seed);
@@ -218,20 +225,37 @@ void RayGen()
         CallShader(fetchData.shader_type_id, evalData);
         seed = evalData.seed;
 
+        if (hw7Constants.debugView == 3 && depth == 0) {
+            output[pixel] =
+                float4(max(evalData.color.toFloat3(), 0.0f), 1.0f);
+            random_seeds[launchIndex] = seed;
+            return;
+        }
+
         float pdf = evalData.pdf;
         if (pdf <= 1e-6f) {
             break;
         }
 
         float nDotL = max(dot(vertex.normalW, L), 0.0f);
+        float3 direct_debug = float3(0.0f, 0.0f, 0.0f);
         if (lightVisible && nDotL > 0.0f) {
+            direct_debug =
+                mul(
+                    Spectrum(rectLight.intensity * lightWeight * nDotL),
+                    evalData.color)
+                    .toFloat3();
             accumulated = add(
                 accumulated,
                 mul(
                     throughput,
-                    mul(
-                        Spectrum(rectLight.intensity * lightWeight * nDotL),
-                        evalData.color)));
+                    Spectrum(direct_debug)));
+        }
+
+        if (hw7Constants.debugView == 2 && depth == 0) {
+            output[pixel] = float4(max(direct_debug, 0.0f), 1.0f);
+            random_seeds[launchIndex] = seed;
+            return;
         }
 
         if (any(isnan(evalData.throughput.toFloat3())) ||
