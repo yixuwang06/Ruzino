@@ -427,12 +427,6 @@ void Hd_RUZINO_Rect_Light::Sync(
         };
 
         ParamLookupResult result;
-        result.value = sceneDelegate->GetLightParamValue(id, token);
-        if (!result.value.IsEmpty()) {
-            result.source = "GetLightParamValue";
-            return result;
-        }
-
         result.value = sceneDelegate->Get(id, token);
         if (!result.value.IsEmpty()) {
             result.source = "Get";
@@ -443,6 +437,12 @@ void Hd_RUZINO_Rect_Light::Sync(
         result.value = sceneDelegate->Get(id, inputs_token);
         if (!result.value.IsEmpty()) {
             result.source = "Get(inputs:*)";
+            return result;
+        }
+
+        result.value = sceneDelegate->GetLightParamValue(id, token);
+        if (!result.value.IsEmpty()) {
+            result.source = "GetLightParamValue";
             return result;
         }
 

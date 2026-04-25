@@ -413,10 +413,24 @@ void Hd_RUZINO_Rect_Light::Sync(
     auto transform = Get(HdTokens->transform).GetWithDefault<GfMatrix4d>();
 
     auto id = GetId();
-    width = sceneDelegate->GetLightParamValue(id, HdLightTokens->width)
-                .Get<float>();
-    height = sceneDelegate->GetLightParamValue(id, HdLightTokens->height)
-                 .Get<float>();
+    auto get_light_param = [&](const TfToken& token) {
+        VtValue value = sceneDelegate->Get(id, token);
+        if (!value.IsEmpty()) {
+            return value;
+        }
+
+        TfToken inputs_token("inputs:" + token.GetString());
+        value = sceneDelegate->Get(id, inputs_token);
+        if (!value.IsEmpty()) {
+            return value;
+        }
+
+        return sceneDelegate->GetLightParamValue(id, token);
+    };
+
+    width = get_light_param(HdLightTokens->width).GetWithDefault<float>(1.0f);
+    height =
+        get_light_param(HdLightTokens->height).GetWithDefault<float>(1.0f);
 
     corner0 = GfVec3f(
         transform.TransformAffine(GfVec3f(-0.5 * width, -0.5 * height, 0)));
@@ -437,17 +451,14 @@ void Hd_RUZINO_Rect_Light::Sync(
         normal = GfVec3f(0.0f, 0.0f, 1.0f);
     }
 
-    auto diffuse = sceneDelegate->GetLightParamValue(id, HdLightTokens->diffuse)
-                       .Get<float>();
+    auto diffuse =
+        get_light_param(HdLightTokens->diffuse).GetWithDefault<float>(1.0f);
     auto intensity =
-        sceneDelegate->GetLightParamValue(id, HdLightTokens->intensity)
-            .GetWithDefault<float>();
+        get_light_param(HdLightTokens->intensity).GetWithDefault<float>(1.0f);
     auto exposure =
-        sceneDelegate->GetLightParamValue(id, HdLightTokens->exposure)
-            .GetWithDefault<float>();
+        get_light_param(HdLightTokens->exposure).GetWithDefault<float>(0.0f);
     float finalIntensity = intensity * std::pow(2.0f, exposure);
-    power = sceneDelegate->GetLightParamValue(id, HdLightTokens->color)
-                 .Get<GfVec3f>() *
+    power = get_light_param(HdLightTokens->color).GetWithDefault<GfVec3f>() *
             diffuse * finalIntensity;
 
     irradiance = area > 1E-8f ? power / area : GfVec3f(0.0f);
