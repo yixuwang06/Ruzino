@@ -420,17 +420,44 @@ void Hd_RUZINO_Rect_Light::Sync(
     const SdfPath& id = this->GetId();
     HdDirtyBits bits = *dirtyBits;
 
-    if (bits & DirtyParams) {
-        VtValue widthValue =
-            sceneDelegate->GetLightParamValue(id, HdLightTokens->width);
-        if (!widthValue.IsEmpty()) {
-            _width = widthValue.Get<float>();
+    auto get_light_param = [&](const TfToken& token) {
+        struct ParamLookupResult {
+            VtValue value;
+            const char* source = "missing";
+        };
+
+        ParamLookupResult result;
+        result.value = sceneDelegate->GetLightParamValue(id, token);
+        if (!result.value.IsEmpty()) {
+            result.source = "GetLightParamValue";
+            return result;
         }
 
-        VtValue heightValue =
-            sceneDelegate->GetLightParamValue(id, HdLightTokens->height);
-        if (!heightValue.IsEmpty()) {
-            _height = heightValue.Get<float>();
+        result.value = sceneDelegate->Get(id, token);
+        if (!result.value.IsEmpty()) {
+            result.source = "Get";
+            return result;
+        }
+
+        TfToken inputs_token("inputs:" + token.GetString());
+        result.value = sceneDelegate->Get(id, inputs_token);
+        if (!result.value.IsEmpty()) {
+            result.source = "Get(inputs:*)";
+            return result;
+        }
+
+        return result;
+    };
+
+    if (bits & DirtyParams) {
+        auto width_lookup = get_light_param(HdLightTokens->width);
+        if (!width_lookup.value.IsEmpty()) {
+            _width = width_lookup.value.Get<float>();
+        }
+
+        auto height_lookup = get_light_param(HdLightTokens->height);
+        if (!height_lookup.value.IsEmpty()) {
+            _height = height_lookup.value.Get<float>();
         }
     }
 
@@ -475,17 +502,15 @@ void Hd_RUZINO_Rect_Light::Sync(
             float3(yVec.x / yLen, yVec.y / yLen, yVec.z / yLen) * _height;
 
         // Get color and intensity with exposure
-        auto diffuse =
-            sceneDelegate->GetLightParamValue(id, HdLightTokens->diffuse)
-                .GetWithDefault<float>(1.0f);
-        auto color = sceneDelegate->GetLightParamValue(id, HdLightTokens->color)
-                         .GetWithDefault<GfVec3f>(GfVec3f(1, 1, 1));
-        auto intensity =
-            sceneDelegate->GetLightParamValue(id, HdLightTokens->intensity)
-                .GetWithDefault<float>(1.0f);
-        auto exposure =
-            sceneDelegate->GetLightParamValue(id, HdLightTokens->exposure)
-                .GetWithDefault<float>(0.0f);
+        auto diffuse_lookup = get_light_param(HdLightTokens->diffuse);
+        auto color_lookup = get_light_param(HdLightTokens->color);
+        auto intensity_lookup = get_light_param(HdLightTokens->intensity);
+        auto exposure_lookup = get_light_param(HdLightTokens->exposure);
+
+        auto diffuse = diffuse_lookup.value.GetWithDefault<float>(1.0f);
+        auto color = color_lookup.value.GetWithDefault<GfVec3f>(GfVec3f(1, 1, 1));
+        auto intensity = intensity_lookup.value.GetWithDefault<float>(1.0f);
+        auto exposure = exposure_lookup.value.GetWithDefault<float>(0.0f);
 
         // Combine intensity with exposure: intensity * 2^exposure
         float finalIntensity = intensity * pow(2.0f, exposure);
@@ -495,7 +520,7 @@ void Hd_RUZINO_Rect_Light::Sync(
         // Debug output
         spdlog::info(
             "RectLight {}: width={}, height={}, color=({},{},{}), "
-            "intensity={}, exposure={}, finalIntensity={}",
+            "intensity={}, exposure={}, finalIntensity={}, value_sources=({}, {}, {}, {}, {}, {})",
             id.GetText(),
             _width,
             _height,
@@ -504,7 +529,13 @@ void Hd_RUZINO_Rect_Light::Sync(
             color[2],
             intensity,
             exposure,
-            finalIntensity);
+            finalIntensity,
+            get_light_param(HdLightTokens->width).source,
+            get_light_param(HdLightTokens->height).source,
+            diffuse_lookup.source,
+            color_lookup.source,
+            intensity_lookup.source,
+            exposure_lookup.source);
 
         // Rectangle area
         lightData.surfaceArea = _width * _height;

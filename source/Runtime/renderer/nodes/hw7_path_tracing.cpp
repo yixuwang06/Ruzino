@@ -1,6 +1,7 @@
 #include <pxr/base/gf/vec2i.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <memory>
 #include <unordered_map>
@@ -87,6 +88,13 @@ NODE_EXECUTION_FUNCTION(hw7_path_tracing)
 {
     using namespace nvrhi;
 
+    constexpr int kMinDepth = 1;
+    constexpr int kMaxDepth = 32;
+    constexpr int kMinRRStartDepth = 1;
+    constexpr int kMaxRRStartDepth = 16;
+    constexpr float kMinRRFloor = 0.01f;
+    constexpr float kMaxRRFloor = 1.0f;
+
     auto& g = global_payload;
     auto geom_dirty =
         g.is_dirty(RenderGlobalPayload::SceneDirtyBits::DirtyGeometry);
@@ -117,9 +125,33 @@ NODE_EXECUTION_FUNCTION(hw7_path_tracing)
 
     storage.rc = &(resource_allocator);
 
-    int max_depth = params.get_input<int>("Max Depth");
-    int rr_start_depth = params.get_input<int>("RR Start Depth");
-    float rr_floor = params.get_input<float>("RR Floor");
+    int requested_max_depth = params.get_input<int>("Max Depth");
+    int requested_rr_start_depth = params.get_input<int>("RR Start Depth");
+    float requested_rr_floor = params.get_input<float>("RR Floor");
+
+    // UI input ranges are enforced interactively, but saved node graphs can
+    // still carry stale or out-of-range values.
+    int max_depth = std::clamp(requested_max_depth, kMinDepth, kMaxDepth);
+    int rr_start_depth = std::clamp(
+        requested_rr_start_depth,
+        kMinRRStartDepth,
+        std::min(kMaxRRStartDepth, max_depth));
+    float rr_floor =
+        std::clamp(requested_rr_floor, kMinRRFloor, kMaxRRFloor);
+
+    if (requested_max_depth != max_depth ||
+        requested_rr_start_depth != rr_start_depth ||
+        requested_rr_floor != rr_floor) {
+        spdlog::warn(
+            "HW7 path tracing clamped settings: depth {}->{} rr_start {}->{} rr_floor {}->{}",
+            requested_max_depth,
+            max_depth,
+            requested_rr_start_depth,
+            rr_start_depth,
+            requested_rr_floor,
+            rr_floor);
+    }
+
     bool settings_changed =
         storage.cached_max_depth != max_depth ||
         storage.cached_rr_start_depth != rr_start_depth ||
@@ -225,6 +257,11 @@ void fetch_)" + material.second->GetMaterialName() +
             light_dirty,
             size_changed,
             settings_changed);
+        spdlog::info(
+            "HW7 path tracing settings: max_depth={} rr_start_depth={} rr_floor={}",
+            max_depth,
+            rr_start_depth,
+            rr_floor);
 
         spdlog::info("HW7 path tracing: creating ProgramVars");
         storage.cached_program_vars = std::make_unique<ProgramVars>(

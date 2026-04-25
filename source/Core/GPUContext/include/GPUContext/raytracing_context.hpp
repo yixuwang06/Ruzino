@@ -81,7 +81,8 @@ class GPUCONTEXT_API RaytracingContext : public GPUContext {
     std::vector<nvrhi::ShaderHandle> miss_shaders;
 
     // Pipeline
-    IProgram* program;
+    // Borrowed from ProgramVars; RaytracingContext owns only the derived RT resources.
+    IProgram* program = nullptr;
     nvrhi::rt::ShaderTableHandle sbt;
     nvrhi::rt::PipelineHandle raytracing_pipeline;
     uint32_t max_recursion_depth_ = 31;

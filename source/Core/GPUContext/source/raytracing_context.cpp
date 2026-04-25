@@ -25,7 +25,6 @@ RaytracingContext::~RaytracingContext()
     }
     resource_allocator_.destroy(raytracing_pipeline);
     resource_allocator_.destroy(sbt);
-    resource_allocator_.destroy(program);
 }
 
 void RaytracingContext::begin()
