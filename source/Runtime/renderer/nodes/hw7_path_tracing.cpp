@@ -287,6 +287,7 @@ void fetch_)" + material.second->GetMaterialName() +
         auto rays = params.get_input<nvrhi::BufferHandle>("Rays");
         auto pixel_target = params.get_input<nvrhi::BufferHandle>("Pixel Target");
 
+        instance_collection->light_pool.compress();
         auto light_buffer = instance_collection->light_pool.get_device_buffer();
         uint32_t light_count =
             static_cast<uint32_t>(instance_collection->light_pool.count());
@@ -374,10 +375,10 @@ void fetch_)" + material.second->GetMaterialName() +
 
         auto& context = *storage.cached_rt_context;
         context.set_max_recursion_depth(2);
-        context.set_max_payload_size(96);
-        context.set_max_attribute_size(2 * sizeof(float));
+        context.set_max_payload_size(256);
+        context.set_max_attribute_size(4 * sizeof(float));
         spdlog::info(
-            "HW7 path tracing: set ray tracing limits recursion_depth=2 payload_bytes=96 attribute_bytes=8");
+            "HW7 path tracing: set ray tracing limits recursion_depth=2 payload_bytes=256 attribute_bytes=16");
 
         context.announce_raygeneration("RayGen");
         context.announce_hitgroup("ClosestHit", "", "", 0);
