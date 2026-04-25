@@ -16,6 +16,7 @@ void eval_custom_red_material(inout EvalCallableData data)
     // Lambertian BRDF evaluation
     float NdotL = max(0.0, dot(data.vertexInfo.normalW, data.L));
     data.color = Spectrum(baseColor * NdotL / 3.14159265359);
+    data.lightPdf = NdotL / 3.14159265359;
     
     // Sample next direction using cosine-weighted hemisphere sampling
     data.sampledDir = sample_cosine_hemisphere_concentric(

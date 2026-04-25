@@ -41,6 +41,13 @@ struct ShadowPayload {
 
 static const float kPi = 3.14159265359f;
 
+float power_heuristic(float pdfA, float pdfB)
+{
+    float a2 = pdfA * pdfA;
+    float b2 = pdfB * pdfB;
+    return a2 / max(a2 + b2, 1e-12f);
+}
+
 bool find_rect_light(out LightData light)
 {
     for (uint i = 0; i < hw7Constants.lightCount; ++i) {
@@ -54,10 +61,78 @@ bool find_rect_light(out LightData light)
     return false;
 }
 
+bool trace_visibility(float3 origin, float3 dir, float tMax)
+{
+    ShadowPayload shadowPayload;
+    shadowPayload.occluded = 0;
+
+    RayDesc shadowRay;
+    shadowRay.Origin = origin;
+    shadowRay.Direction = dir;
+    shadowRay.TMin = 1e-3f;
+    shadowRay.TMax = max(tMax - 2e-3f, shadowRay.TMin);
+
+    TraceRay(
+        SceneBVH,
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
+        0xFF,
+        1,
+        1,
+        1,
+        shadowRay,
+        shadowPayload);
+
+    return shadowPayload.occluded == 0;
+}
+
 float3 sample_rect_light_point(LightData light, float2 xi)
 {
     return light.posW + (xi.x - 0.5f) * light.tangent +
            (xi.y - 0.5f) * light.bitangent;
+}
+
+bool intersect_rect_light_ray(
+    float3 origin,
+    float3 dir,
+    LightData light,
+    out float t,
+    out float cosLight,
+    out float lightPdfW)
+{
+    t = 0.0f;
+    cosLight = 0.0f;
+    lightPdfW = 0.0f;
+
+    float denom = dot(dir, light.dirW);
+    if (denom >= -1e-5f) {
+        return false;
+    }
+
+    t = dot(light.posW - origin, light.dirW) / denom;
+    if (t <= 1e-3f) {
+        return false;
+    }
+
+    float3 hitPos = origin + dir * t;
+    float3 local = hitPos - light.posW;
+    float tangentLen2 = max(dot(light.tangent, light.tangent), 1e-6f);
+    float bitangentLen2 = max(dot(light.bitangent, light.bitangent), 1e-6f);
+    float u = dot(local, light.tangent) / tangentLen2;
+    float v = dot(local, light.bitangent) / bitangentLen2;
+
+    if (abs(u) > 0.5f || abs(v) > 0.5f) {
+        return false;
+    }
+
+    cosLight = max(dot(light.dirW, -dir), 0.0f);
+    if (cosLight <= 0.0f) {
+        return false;
+    }
+
+    float pdfA = 1.0f / max(light.surfaceArea, 1e-6f);
+    float dist2 = t * t;
+    lightPdfW = dist2 * pdfA / max(cosLight, 1e-6f);
+    return true;
 }
 
 float3 sky_color(float3 dir)
@@ -218,6 +293,7 @@ void RayGen()
         evalData.V = -currentRay.Direction;
         evalData.sampledDir = vertex.normalW;
         evalData.pdf = 0.0f;
+        evalData.lightPdf = 0.0f;
         evalData.seed = seed;
         evalData.eta_flipped = payload.etaFlipped;
         evalData.material_params_index = launchIndex;
@@ -240,11 +316,17 @@ void RayGen()
         float nDotL = max(dot(vertex.normalW, L), 0.0f);
         float3 direct_debug = float3(0.0f, 0.0f, 0.0f);
         if (lightVisible && nDotL > 0.0f) {
+            float pdfA = 1.0f / max(rectLight.surfaceArea, 1e-6f);
+            float lightPdfW =
+                1.0f / max(lightWeight, 1e-6f) / max(nDotL, 1e-6f) * nDotL;
+            float misWeight =
+                power_heuristic(lightPdfW, max(evalData.lightPdf, 0.0f));
             direct_debug =
                 mul(
                     Spectrum(rectLight.intensity * lightWeight * nDotL),
                     evalData.color)
-                    .toFloat3();
+                    .toFloat3() *
+                misWeight;
             accumulated = add(
                 accumulated,
                 mul(
@@ -256,6 +338,42 @@ void RayGen()
             output[pixel] = float4(max(direct_debug, 0.0f), 1.0f);
             random_seeds[launchIndex] = seed;
             return;
+        }
+
+        bool isTransmission = dot(evalData.sampledDir, vertex.faceNormalW) < 0.0f;
+        float3 offsetNormal =
+            isTransmission ? -vertex.faceNormalW : vertex.faceNormalW;
+        float3 bsdfOrigin = P + offsetNormal * 1e-3f;
+        float3 bsdfDir = normalize(evalData.sampledDir);
+
+        if (find_rect_light(rectLight)) {
+            float lightHitT = 0.0f;
+            float lightHitCos = 0.0f;
+            float lightHitPdfW = 0.0f;
+            if (intersect_rect_light_ray(
+                    bsdfOrigin,
+                    bsdfDir,
+                    rectLight,
+                    lightHitT,
+                    lightHitCos,
+                    lightHitPdfW) &&
+                trace_visibility(bsdfOrigin, bsdfDir, lightHitT)) {
+                float misWeight =
+                    power_heuristic(max(pdf, 0.0f), lightHitPdfW);
+                Spectrum bsdfToLight =
+                    mul(div(evalData.throughput, max(pdf, 1e-6f)),
+                        Spectrum(rectLight.intensity * misWeight));
+                accumulated = add(accumulated, mul(throughput, bsdfToLight));
+
+                if (hw7Constants.debugView == 2 && depth == 0) {
+                    output[pixel] =
+                        float4(max(bsdfToLight.toFloat3(), 0.0f), 1.0f);
+                    random_seeds[launchIndex] = seed;
+                    return;
+                }
+
+                break;
+            }
         }
 
         if (any(isnan(evalData.throughput.toFloat3())) ||
@@ -277,12 +395,8 @@ void RayGen()
 
         throughput = mul(throughput, div(evalData.throughput, pdf));
 
-        bool isTransmission = dot(evalData.sampledDir, vertex.faceNormalW) < 0.0f;
-        float3 offsetNormal =
-            isTransmission ? -vertex.faceNormalW : vertex.faceNormalW;
-
         currentRay.Origin = P + offsetNormal * 1e-3f;
-        currentRay.Direction = normalize(evalData.sampledDir);
+        currentRay.Direction = bsdfDir;
         currentRay.TMin = 1e-3f;
         currentRay.TMax = 50000.0f;
     }

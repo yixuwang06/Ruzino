@@ -11,6 +11,8 @@ void eval_fallback(inout EvalCallableData data)
     float3 color3 = float3(0.8);  // Default color for fallback
     data.color =
         Spectrum(color3 * max(0.0, dot(data.L, data.vertexInfo.normalW)));
+    data.lightPdf =
+        max(0.0, dot(data.vertexInfo.normalW, data.L)) / 3.14159265359;
 
     data.sampledDir =
         sample_cosine_hemisphere_concentric(random_float2(data.seed), data.pdf);
