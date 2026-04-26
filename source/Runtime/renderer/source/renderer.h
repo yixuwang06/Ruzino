@@ -16,6 +16,10 @@ class Hd_RUZINO_Renderer {
     void SetAovBindings(const HdRenderPassAovBindingVector& aovBindings);
     virtual void Render(HdRenderThread* render_thread);
     void Clear();
+    int GetCompletedSamples() const
+    {
+        return _completedSamples.load();
+    }
 
     void MarkAovBuffersUnconverged();
 

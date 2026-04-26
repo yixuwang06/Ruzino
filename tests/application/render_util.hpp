@@ -86,6 +86,17 @@ inline UsdGeomCamera GetCamera(
         }
     }
 
+    // Match the GUI's default behavior first when a saved /FreeCamera exists.
+    static const std::string kGuiDefaultCamera = "/FreeCamera";
+    auto free_camera_it = std::find(
+        available_cameras.begin(), available_cameras.end(), kGuiDefaultCamera);
+    if (free_camera_it != available_cameras.end()) {
+        SdfPath path(*free_camera_it);
+        UsdPrim prim = stage->GetPrimAtPath(path);
+        spdlog::info("Using GUI-aligned default camera: {}", *free_camera_it);
+        return UsdGeomCamera(prim);
+    }
+
     // Fall back to first camera
     if (!available_cameras.empty()) {
         SdfPath path(available_cameras[0]);

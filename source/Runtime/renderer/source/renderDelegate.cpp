@@ -578,6 +578,10 @@ VtValue Hd_RUZINO_RenderDelegate::GetRenderSetting(TfToken const& key) const
         return VtValue(reinterpret_cast<const void*>(&node_system));
     }
 
+    if (key == TfToken("CompletedSamples")) {
+        return VtValue(_renderer ? _renderer->GetCompletedSamples() : 0);
+    }
+
 
 #ifdef RUZINO_DIRECT_VK_DISPLAY
     if (key == TfToken("VulkanColorAov")) {

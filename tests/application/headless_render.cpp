@@ -275,6 +275,19 @@ bool HasPublishedVulkanColorAov(UsdImagingGLEngine* renderer)
     return rendered != nullptr;
 }
 
+bool ReadCompletedSamples(
+    UsdImagingGLEngine* renderer,
+    int& completed_samples)
+{
+    auto value = renderer->GetRendererSetting(pxr::TfToken("CompletedSamples"));
+    if (!value.IsHolding<int>()) {
+        return false;
+    }
+
+    completed_samples = value.UncheckedGet<int>();
+    return true;
+}
+
 }
 
 int main(int argc, char* argv[])
@@ -456,6 +469,9 @@ int main(int argc, char* argv[])
         bool is_ruzino_embree_renderer =
             (available_renderers[selected_renderer].GetString() ==
              "Hd_RUZINO_Embree_RendererPlugin");
+        bool is_ruzino_gl_renderer =
+            (available_renderers[selected_renderer].GetString() ==
+             "Hd_RUZINO_GL_RendererPlugin");
         bool is_storm_renderer =
             (selected_renderer == 0 && !is_ruzino_renderer);
         bool needs_convergence_wait =
@@ -486,11 +502,11 @@ int main(int argc, char* argv[])
         render_params.clearColor = GfVec4f(1.f, 1.f, 1.f, 0.0f);
         renderer->SetRendererAov(HdAovTokens->color);
 
-        // Load and apply JSON script (only for Ruzino renderer)
-        if (is_ruzino_renderer) {
+        // Load and apply JSON script for renderers exposing a RenderNodeSystem.
+        if (is_ruzino_renderer || is_ruzino_gl_renderer) {
             if (json_script.empty() || !std::filesystem::exists(json_script)) {
                 std::cerr << "Error: JSON script required for Ruzino renderer "
-                             "but not found: "
+                              "but not found: "
                           << json_script << std::endl;
                 return 1;
             }
@@ -597,6 +613,21 @@ int main(int argc, char* argv[])
                         saw_published_texture =
                             saw_published_texture ||
                             HasPublishedVulkanColorAov(renderer.get());
+                        if (is_ruzino_renderer) {
+                            int completed_samples = 0;
+                            if (ReadCompletedSamples(
+                                    renderer.get(), completed_samples) &&
+                                completed_samples >= std::max(1, spp)) {
+                                spdlog::info(
+                                    "headless_render accepted renderer sample completion "
+                                    "without Hydra convergence "
+                                    "(completed_samples={}, target_samples={}, published_texture_seen={})",
+                                    completed_samples,
+                                    std::max(1, spp),
+                                    saw_published_texture);
+                                break;
+                            }
+                        }
                         if (std::chrono::steady_clock::now() - wait_start >
                             kRenderTimeout) {
                             spdlog::warn(
@@ -767,7 +798,15 @@ int main(int argc, char* argv[])
             }
 
             bool success = false;
-            if (is_ruzino_embree_renderer) {
+            // Match the GUI display path first for Ruzino renderers: prefer the
+            // final presented texture produced by the render-node graph instead
+            // of a generic Hydra color AOV that may bypass tonemapping/gamma.
+            if (is_ruzino_renderer || is_ruzino_gl_renderer) {
+                success = ReadTextureFromRenderNodeSystem(
+                    renderer.get(), width, height, texture_data, texture_format);
+            }
+
+            if (!success && is_ruzino_embree_renderer) {
                 success = ReadEmbreeRenderBuffer(
                     renderer.get(), width, height, texture_data, texture_format);
             }
@@ -780,11 +819,6 @@ int main(int argc, char* argv[])
             if (!success) {
                 success = ReadTextureCPU(
                     renderer.get(), hgi, width, height, texture_data);
-            }
-
-            if (!success && is_ruzino_renderer) {
-                success = ReadTextureFromRenderNodeSystem(
-                    renderer.get(), width, height, texture_data, texture_format);
             }
 
             if (!success) {
