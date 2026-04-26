@@ -31,18 +31,6 @@ Hd_RUZINO_Renderer::~Hd_RUZINO_Renderer()
         render_param->node_system->get_node_tree_executor());
 }
 
-Hd_RUZINO_RenderBuffer* Hd_RUZINO_Renderer::GetAovRenderBuffer(
-    const TfToken& name) const
-{
-    for (const auto& binding : _aovBindings) {
-        if (binding.aovName != name || !binding.renderBuffer) {
-            continue;
-        }
-        return static_cast<Hd_RUZINO_RenderBuffer*>(binding.renderBuffer);
-    }
-    return nullptr;
-}
-
 static TextureHandle create_empty_texture(
     const pxr::GfVec2i& size,
     nvrhi::Format format = nvrhi::Format::RGBA32_FLOAT)
@@ -173,28 +161,13 @@ void Hd_RUZINO_Renderer::Render(HdRenderThread* renderThread)
                 }
 
                 if (!data) {
-                    spdlog::warn(
-                        "Hd_RUZINO_Renderer::Render present node '{}' has no exported texture data",
-                        present_name);
                     continue;
                 }
 
                 nvrhi::TextureHandle texture = data.cast<nvrhi::TextureHandle>();
                 if (!texture) {
-                    spdlog::warn(
-                        "Hd_RUZINO_Renderer::Render present node '{}' exported a null texture handle",
-                        present_name);
                     continue;
                 }
-
-                const auto& presented_desc = texture->getDesc();
-                spdlog::info(
-                    "Hd_RUZINO_Renderer::Render publishing '{}' texture {}x{} format={} converged={}",
-                    present_name,
-                    presented_desc.width,
-                    presented_desc.height,
-                    static_cast<int>(presented_desc.format),
-                    frame_converged);
 
                 std::string texture_name =
                     node->ui_name.empty() ? present_name : node->ui_name;
@@ -222,8 +195,6 @@ void Hd_RUZINO_Renderer::Render(HdRenderThread* renderThread)
             if (render_param->default_texture_name.empty()) {
                 auto empty_tex = create_empty_texture(
                     GfVec2i{ 16, 16 }, nvrhi::Format::RGBA32_FLOAT);
-                spdlog::warn(
-                    "Hd_RUZINO_Renderer::Render published fallback empty texture because no present node texture was available");
                 {
                     std::scoped_lock lock(render_param->presented_textures_mutex);
                     render_param->presented_textures["_empty"] = empty_tex;

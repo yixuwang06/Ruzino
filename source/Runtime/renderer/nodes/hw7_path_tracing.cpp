@@ -79,7 +79,6 @@ NODE_DECLARATION_FUNCTION(hw7_path_tracing)
 struct HW7PathTracingConstants {
     uint32_t lightCount;
     uint32_t materialFetchCallableBaseIndex;
-    uint32_t materialOpacityCallableOffset;
     uint32_t maxDepth;
     uint32_t rrStartDepth;
     float rrProbFloor;
@@ -322,7 +321,6 @@ void fetch_)" + material.second->GetMaterialName() +
             light_count,
             static_cast<uint32_t>(
                 3 + storage.custom_shader_eval_indices.size()),
-            static_cast<uint32_t>(storage.callable_shaders.size()),
             static_cast<uint32_t>(max_depth),
             static_cast<uint32_t>(rr_start_depth),
             rr_floor
@@ -414,18 +412,6 @@ void fetch_)" + material.second->GetMaterialName() +
                 fetch_name, base_fetch_index + callable.first, nullptr);
         }
         spdlog::info("HW7 path tracing: fetch callables announced");
-
-        int base_opacity_index =
-            base_fetch_index + static_cast<int>(storage.callable_shaders.size());
-        for (auto& callable : storage.callable_shaders) {
-            std::string opacity_name =
-                storage.custom_shader_eval_indices.count(callable.first) > 0
-                    ? "fetch_" + callable.second + "_opacity"
-                    : callable.second + "_opacity";
-            context.announce_callable(
-                opacity_name, base_opacity_index + callable.first, nullptr);
-        }
-        spdlog::info("HW7 path tracing: opacity fetch callables announced");
 
         spdlog::info("HW7 path tracing: finishing shader name announcements");
         {

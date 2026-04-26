@@ -80,7 +80,6 @@ class HD_RUZINO_API Hd_RUZINO_Mesh final : public HdMesh {
     bool pending_single_instance_upload = false;
     size_t pending_single_instance_count = 0;
     int pending_material_location = -1;
-    bool subset_materials_cover_all_faces_ = false;
 
     GfMatrix4f transform;
     VtArray<GfVec3i> triangulatedIndices;

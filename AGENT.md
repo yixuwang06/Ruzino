@@ -12,30 +12,19 @@
 
 ## Verification
 - Run the narrowest relevant build, test, or check for the code you changed.
-- On Windows, this build must be run only in a real foreground PowerShell window.
-- Before running the specified 3D build command sequence, an agent must open a completely fresh foreground PowerShell window. Do not reuse an existing terminal session.
-- Successful manual command sequence in `build`:
+- On Windows, enter `build`, then run:
   - `$vsPath = & (Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe") -property installationPath`
   - `Import-Module (Join-Path $vsPath "Common7\Tools\Microsoft.VisualStudio.DevShell.dll")`
-  - `Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments "-arch=x64"`
+  - `Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation`
   - `cmake .. -G Ninja`
   - `ninja`
-- Successful script launch command in `build`:
-  - `powershell -NoLogo -ExecutionPolicy Bypass -File ..\scripts\build_windows_ninja.ps1`
-- `scripts/build_windows_ninja.ps1` is the approved wrapper for this workflow.
-- This build command sequence is fixed. Do not modify, simplify, reorder, replace, parameterize, or partially run it.
-- Always run the full build. Do not change it to incremental, target-specific, background, hidden, tool-hosted, or otherwise reduced execution.
-- The script must keep the six build commands intact and only add logging plus automatic terminal exit.
-- The script already normalizes conflicting `Path` / `PATH` process environment entries before `Enter-VsDevShell`. Do not add a different environment workaround unless this one is proven insufficient.
-- The script must overwrite `build/build_windows_ninja.log` on each run.
-- The log must include terminal-visible output from both `cmake` and `ninja`, including `ninja` failure output.
-- If an agent needs to verify this build, it must strictly use the successful script launch command above.
-- A normal successful run usually completes within about 30 seconds.
-- When a tool-hosted agent launches the foreground build window, it must not rely on one long blocking wait command to infer completion. Launch first, then inspect process and log state with separate follow-up commands.
-- If the foreground PowerShell window has not exited automatically after 2 minutes, treat that as abnormal and inspect status immediately.
-- Status inspection commands from the repository root:
-  - `Get-Process | Where-Object { $_.ProcessName -in @('powershell','cmake','ninja') } | Select-Object ProcessName,Id,StartTime,CPU`
-  - `Get-Content D:\vsprojects\USTC_CG_26\Framework3D\Ruzino\build\build_windows_ninja.log -Tail 120`
+- `scripts/build_windows_ninja.ps1` is a direct wrapper around the same sequence.
+- This build must be launched in a real foreground PowerShell window. Do not run it only through a background or tool-hosted shell, because that mode may hang or miss the environment that the framework expects.
+- Do not modify, simplify, reorder, or replace this build command sequence.
+- Always run the full build here. Do not change it to a partial, incremental, target-only, or otherwise reduced compile flow.
+- That script only adds two behaviors around the original six build commands: it writes all output to `build/build_windows_ninja.log`, and it exits the foreground terminal automatically after the run finishes.
+- That script overwrites `build/build_windows_ninja.log` on each run.
+- When launched as a standalone `powershell -File ...` process, it exits automatically after the run finishes.
 - If you could not verify something, say so explicitly.
 - Report failures faithfully. Do not claim success without checking.
 

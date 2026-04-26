@@ -646,25 +646,10 @@ void Hd_RUZINO_MaterialX::ensure_shader_ready(const ShaderFactory& factory)
         final_shader_source = eval_shader_source + slang_source_code_main;
     }
     else {
-        if (!GetId().GetString().empty()) {
+        if (!GetId().GetString().empty())
             spdlog::warn(
                 "MaterialX: eval_shader_source is empty for material '{}'",
                 GetId().GetString());
-        }
-
-        // When MaterialX generation fails or yields no fetch/eval source, fall
-        // back to the generic material callable implementation instead of
-        // leaving wrappers that reference undefined fetch helpers.
-        if (slang_source_code_main.find("void fetch_shader_data(") !=
-            std::string::npos) {
-            final_shader_source = slang_source_code_main;
-        }
-        else {
-            final_shader_source = eval_source_code_fallback + slang_source_code_main;
-        }
-        spdlog::warn(
-            "MaterialX: Falling back to generic shader source for material '{}'",
-            GetId().GetText());
     }
 
     // Combine shader parts into final source
@@ -696,84 +681,39 @@ void Hd_RUZINO_MaterialX::ensure_shader_ready(const ShaderFactory& factory)
 
 void Hd_RUZINO_MaterialX::BuildGPUTextures(Hd_RUZINO_RenderParam* render_param)
 {
-    if (!render_param || !render_param->InstanceCollection) {
-        spdlog::error(
-            "BuildGPUTextures: render param or instance collection is null for material '{}'",
-            GetId().GetText());
-        return;
-    }
-
     auto descriptor_table =
         render_param->InstanceCollection->get_texture_descriptor_table();
-    if (!descriptor_table) {
-        spdlog::error(
-            "BuildGPUTextures: texture descriptor table is null for material '{}'",
-            GetId().GetText());
-        return;
-    }
 
     for (auto& texture_resource : textureResources) {
-        const std::string texture_key = texture_resource.first;
-        auto* texture_state = &texture_resource.second;
-
         // Create a thread for asynchronous processing
-        std::thread texture_thread([texture_key,
-                                    texture_state,
+        std::thread texture_thread([&texture_resource,
                                     this,
                                     descriptor_table]() {
             auto device = RHI::get_device();
-            if (!device) {
-                spdlog::error(
-                    "BuildGPUTextures: RHI device is null for material '{}' texture '{}'",
-                    GetId().GetText(),
-                    texture_key);
-                return;
-            }
 
-            auto image = texture_state->image;
-            if (!image) {
-                spdlog::error(
-                    "BuildGPUTextures: image is null for material '{}' texture '{}'",
-                    GetId().GetText(),
-                    texture_key);
-                return;
-            }
+            auto image = texture_resource.second.image;
 
-            const auto image_format = image->GetFormat();
             nvrhi::TextureDesc desc;
             desc.width = image->GetWidth();
             desc.height = image->GetHeight();
-            desc.format = RHI::ConvertFromHioFormat(image_format);
-
-            if (image_format == HioFormatFloat32Vec3) {
-                desc.format = nvrhi::Format::RGBA32_FLOAT;
-            }
-            else if (image_format == HioFormatFloat16Vec3) {
-                desc.format = nvrhi::Format::RGBA16_FLOAT;
-            }
-            else if (image_format == HioFormatUNorm8Vec3) {
-                desc.format = nvrhi::Format::RGBA8_UNORM;
-            }
+            desc.format = RHI::ConvertFromHioFormat(image->GetFormat());
 
             // Force linear format for non-sRGB textures (like normal maps)
-            if (!texture_state->isSRGB) {
+            if (!texture_resource.second.isSRGB) {
                 if (desc.format == nvrhi::Format::SRGBA8_UNORM) {
                     desc.format = nvrhi::Format::RGBA8_UNORM;
                 }
             }
 
-            if (desc.format == nvrhi::Format::UNKNOWN) {
-                spdlog::error(
-                    "BuildGPUTextures: unsupported Hio format {} for material '{}' texture '{}'",
-                    static_cast<int>(image_format),
-                    GetId().GetText(),
-                    texture_key);
-                return;
-            }
-
             desc.initialState = nvrhi::ResourceStates::ShaderResource;
             desc.isRenderTarget = false;
             desc.keepInitialState = true;
+
+            texture_resource.second.texture = device->createTexture(desc);
+
+            auto texture_name = std::filesystem::path(texture_resource.first)
+                                    .filename()
+                                    .string();
 
             auto storage_byte_size = image->GetBytesPerPixel();
 
@@ -788,13 +728,12 @@ void Hd_RUZINO_MaterialX::BuildGPUTextures(Hd_RUZINO_RenderParam* render_param)
             storageSpec.data = data.data();
 
             // Read the image data asynchronously
-            texture_state->image->Read(storageSpec);
+            texture_resource.second.image->Read(storageSpec);
 
             {
                 std::lock_guard lock(texture_mutex);
-                if (image_format == HioFormatUNorm8Vec3srgb ||
-                    image_format == HioFormatUNorm8Vec3) {
-                    // Expand RGB8 data to RGBA8 for NVRHI.
+                if (image->GetFormat() == HioFormatUNorm8Vec3srgb) {
+                    // rearrange the data to be RGBA
                     std::vector<uint8_t> rgba_data(
                         image->GetWidth() * image->GetHeight() * 4, 0);
                     for (size_t i = 0; i < data.size() / 3; i++) {
@@ -805,70 +744,28 @@ void Hd_RUZINO_MaterialX::BuildGPUTextures(Hd_RUZINO_RenderParam* render_param)
                     }
                     data = std::move(rgba_data);
                 }
-                else if (image_format == HioFormatFloat16Vec3) {
-                    constexpr uint16_t kHalfOne = 0x3C00;
-                    std::vector<uint16_t> rgba_data(
-                        image->GetWidth() * image->GetHeight() * 4, 0);
-                    const uint16_t* src =
-                        reinterpret_cast<const uint16_t*>(data.data());
-                    for (size_t i = 0; i < rgba_data.size() / 4; ++i) {
-                        rgba_data[i * 4] = src[i * 3];
-                        rgba_data[i * 4 + 1] = src[i * 3 + 1];
-                        rgba_data[i * 4 + 2] = src[i * 3 + 2];
-                        rgba_data[i * 4 + 3] = kHalfOne;
-                    }
-                    data.resize(rgba_data.size() * sizeof(uint16_t));
-                    memcpy(data.data(), rgba_data.data(), data.size());
-                }
-                else if (image_format == HioFormatFloat32Vec3) {
-                    std::vector<float> rgba_data(
-                        image->GetWidth() * image->GetHeight() * 4, 0.0f);
-                    const float* src =
-                        reinterpret_cast<const float*>(data.data());
-                    for (size_t i = 0; i < rgba_data.size() / 4; ++i) {
-                        rgba_data[i * 4] = src[i * 3];
-                        rgba_data[i * 4 + 1] = src[i * 3 + 1];
-                        rgba_data[i * 4 + 2] = src[i * 3 + 2];
-                        rgba_data[i * 4 + 3] = 1.0f;
-                    }
-                    data.resize(rgba_data.size() * sizeof(float));
-                    memcpy(data.data(), rgba_data.data(), data.size());
-                }
 
                 auto [gpu_texture, staging] =
                     RHI::load_texture(desc, data.data());
-                if (!gpu_texture) {
-                    spdlog::error(
-                        "BuildGPUTextures: failed to upload texture '{}' for material '{}'",
-                        texture_key,
-                        GetId().GetText());
-                    return;
-                }
 
-                texture_state->texture = gpu_texture;
-                texture_state->descriptor =
-                    descriptor_table->CreateDescriptorHandle(
-                        nvrhi::BindingSetItem::Texture_SRV(
-                            0, texture_state->texture, desc.format));
+                texture_resource.second.texture = gpu_texture;
+            }
 
-                if (!texture_state->descriptor.IsValid()) {
-                    spdlog::error(
-                        "BuildGPUTextures: failed to create descriptor for texture '{}' on material '{}'",
-                        texture_key,
-                        GetId().GetText());
-                    texture_state->texture = nullptr;
-                    return;
-                }
+            texture_resource.second.descriptor =
+                descriptor_table->CreateDescriptorHandle(
+                    nvrhi::BindingSetItem::Texture_SRV(
+                        0, texture_resource.second.texture, desc.format));
 
-                auto texture_id = texture_state->descriptor.Get();
+            if (texture_resource.second.texture) {
+                auto texture_id = texture_resource.second.descriptor.Get();
 
                 spdlog::info(
                     "BuildGPUTextures: Looking for texture key '{}' with ID {}",
-                    texture_key,
+                    texture_resource.first,
                     texture_id);
 
                 // Find the data location for this texture's ID
-                auto it = texture_id_locations.find(texture_key);
+                auto it = texture_id_locations.find(texture_resource.first);
                 if (it != texture_id_locations.end()) {
                     unsigned int location = it->second;
                     // Write texture ID directly to the data buffer
@@ -882,14 +779,14 @@ void Hd_RUZINO_MaterialX::BuildGPUTextures(Hd_RUZINO_RenderParam* render_param)
 
                     spdlog::info(
                         "Texture '{}' ID {} written to data location {}",
-                        texture_key,
+                        texture_resource.first,
                         texture_id,
                         location);
                 }
                 else {
                     spdlog::warn(
                         "Texture '{}' not found in texture_id_locations map",
-                        texture_key);
+                        texture_resource.first);
                 }
             }
         });

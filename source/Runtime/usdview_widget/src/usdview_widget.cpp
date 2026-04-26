@@ -10,7 +10,6 @@
 #include <any>
 #include <cstdio>
 #include <mutex>
-#include <tuple>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -25,7 +24,6 @@
 #include "GCore/geom_payload.hpp"
 #include "GUI/window.h"
 #include "RHI/Hgi/desc_conversion.hpp"
-#include "RHI/Hgi/format_conversion.hpp"
 #include "RHI/rhi.hpp"
 #include "free_camera.hpp"
 #include "imgui.h"
@@ -34,7 +32,6 @@
 #include "nvrhi/nvrhi.h"
 #include "pxr/base/gf/camera.h"
 #include "pxr/base/gf/frustum.h"
-#include "pxr/imaging/hd/renderBuffer.h"
 #include "pxr/imaging/glf/drawTarget.h"
 #include "pxr/imaging/hdx/tokens.h"
 #include "pxr/imaging/hgi/blitCmds.h"
@@ -71,92 +68,11 @@ static void InitializeCameraAttributes(BaseCamera* camera)
     camera->CreateFocusDistanceAttr().Set(10.0f);
 }
 
-struct UsdviewEnginePrivateData;
-
-static bool UpdatePresentationFromRuzinoRenderBuffer(
-    pxr::UsdImagingGLEngine* renderer,
-    UsdviewEnginePrivateData* data,
-    std::vector<uint8_t>& texture_data);
-
 struct UsdviewEnginePrivateData {
     nvrhi::TextureHandle nvrhi_texture = nullptr;
     nvrhi::StagingTextureHandle staging = nullptr;
     nvrhi::Format present_format = nvrhi::Format::RGBA32_FLOAT;
 };
-
-static bool UpdatePresentationFromRuzinoRenderBuffer(
-    pxr::UsdImagingGLEngine* renderer,
-    UsdviewEnginePrivateData* data,
-    std::vector<uint8_t>& texture_data)
-{
-    auto value = renderer->GetRendererSetting(
-        pxr::TfToken("RuzinoColorAovRenderBuffer"));
-    if (!value.IsHolding<const void*>()) {
-        return false;
-    }
-
-    auto* render_buffer =
-        reinterpret_cast<pxr::HdRenderBuffer*>(const_cast<void*>(
-            value.Get<const void*>()));
-    if (!render_buffer || render_buffer->GetWidth() == 0 ||
-        render_buffer->GetHeight() == 0) {
-        return false;
-    }
-
-    const auto hd_format = render_buffer->GetFormat();
-    const auto nvrhi_format = RHI::ConvertToNvrhiFormat(hd_format);
-    if (nvrhi_format == nvrhi::Format::UNKNOWN) {
-        spdlog::warn(
-            "UsdviewEngine: unsupported Ruzino render buffer HdFormat={}",
-            static_cast<int>(hd_format));
-        return false;
-    }
-
-    const auto width = render_buffer->GetWidth();
-    const auto height = render_buffer->GetHeight();
-    const size_t buffer_size = static_cast<size_t>(width) *
-                               static_cast<size_t>(height) *
-                               HdDataSizeOfFormat(hd_format);
-    if (buffer_size == 0) {
-        return false;
-    }
-
-    texture_data.resize(buffer_size);
-
-    render_buffer->Resolve();
-    void* mapped = render_buffer->Map();
-    if (!mapped) {
-        spdlog::warn("UsdviewEngine: failed to map Ruzino render buffer");
-        return false;
-    }
-    memcpy(texture_data.data(), mapped, buffer_size);
-    render_buffer->Unmap();
-
-    nvrhi::TextureDesc tex_desc;
-    tex_desc.width = width;
-    tex_desc.height = height;
-    tex_desc.format = nvrhi_format;
-    tex_desc.keepInitialState = true;
-    tex_desc.initialState = nvrhi::ResourceStates::CopyDest;
-
-    if (!data->nvrhi_texture || data->nvrhi_texture->getDesc().width != width ||
-        data->nvrhi_texture->getDesc().height != height ||
-        data->nvrhi_texture->getDesc().format != nvrhi_format) {
-        std::tie(data->nvrhi_texture, data->staging) =
-            RHI::load_texture(tex_desc, texture_data.data());
-    }
-    else {
-        RHI::write_texture(
-            data->nvrhi_texture.Get(),
-            data->staging.Get(),
-            texture_data.data());
-    }
-
-    data->present_format = nvrhi_format;
-    spdlog::info(
-        "UsdviewEngine: finish_render updated presentation from Ruzino render buffer");
-    return true;
-}
 
 UsdviewEngine::UsdviewEngine(Stage* stage) : stage_(stage)
 {
@@ -1306,12 +1222,6 @@ void UsdviewEngine::finish_render()
 
     spdlog::info("UsdviewEngine: finish_render begin");
     auto* device = RHI::get_device();
-    if (UpdatePresentationFromRuzinoRenderBuffer(
-            renderer_.get(), data_.get(), texture_data_)) {
-        spdlog::info("UsdviewEngine: finish_render end");
-        return;
-    }
-
     auto hacked_handle =
         renderer_->GetRendererSetting(pxr::TfToken("VulkanColorAov"));
 

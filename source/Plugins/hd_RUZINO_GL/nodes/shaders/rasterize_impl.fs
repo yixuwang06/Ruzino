@@ -29,22 +29,13 @@ void main() {
     diffuseColor = texture2D(diffuseColorSampler, vTexcoord).xyz;
     metallicRoughness = texture2D(metallicRoughnessSampler, vTexcoord).zy;
 
+    vec3 geometricNormal = normalize(vertexNormal);
+    vec3 normalmap_value = texture2D(normalMapSampler, vTexcoord).xyz * 2.0 - 1.0;
+
     vec3 dpdx = dFdx(vertexPosition);
     vec3 dpdy = dFdy(vertexPosition);
     vec2 duvdx = dFdx(vTexcoord);
     vec2 duvdy = dFdy(vTexcoord);
-    vec3 shadingNormalHint = normalize(vertexNormal);
-    vec3 geometricNormal = normalize(cross(dpdx, dpdy));
-    if (dot(geometricNormal, shadingNormalHint) < 0.0) {
-        geometricNormal = -geometricNormal;
-    }
-
-    vec3 sampledMap = texture2D(normalMapSampler, vTexcoord).xyz;
-    vec3 normalmap_value = sampledMap * 2.0 - 1.0;
-    float grayscaleSpread = max(
-        abs(sampledMap.r - sampledMap.g),
-        max(abs(sampledMap.g - sampledMap.b), abs(sampledMap.r - sampledMap.b)));
-    bool useDisplacementNormal = grayscaleSpread < 0.05;
 
     float det = duvdx.x * duvdy.y - duvdx.y * duvdy.x;
     vec3 tangent;
@@ -65,8 +56,7 @@ void main() {
     bitangent = normalize(bitangent - dot(bitangent, geometricNormal) * geometricNormal -
                           dot(bitangent, tangent) * tangent);
 
-    if (useDisplacementNormal ||
-        (length(normalmap_value.xy) < 1E-5 && normalmap_value.z > 0.9999)) {
+    if (length(normalmap_value.xy) < 1E-5 && normalmap_value.z > 0.9999) {
         // Flat/default normal map should preserve the interpolated geometry normal.
         normal = geometricNormal;
     } else {

@@ -41,7 +41,7 @@ NODE_DECLARATION_FUNCTION(accumulate)
 {
     // Function content omitted
     b.add_input<nvrhi::TextureHandle>("Texture");
-    b.add_input<int>("Max Samples").min(0).max(2048).default_val(256);
+    b.add_input<int>("Max Samples").min(0).max(64).default_val(16);
 
     b.add_output<nvrhi::TextureHandle>("Accumulated");
 }
@@ -138,11 +138,6 @@ NODE_EXECUTION_FUNCTION(accumulate)
         storage.cached_spp_cb, nvrhi::CpuAccessMode::Write);
     memcpy(ptr, &storage.current_spp, sizeof(int));
     resource_allocator.device->unmapBuffer(storage.cached_spp_cb);
-
-    if (max_samples > 0 && storage.current_spp >= max_samples) {
-        params.set_output("Accumulated", storage.accumulated);
-        return true;
-    }
 
     // Execute compute shader using cached context
     storage.cached_compute_context->begin();

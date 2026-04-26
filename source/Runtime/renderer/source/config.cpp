@@ -41,7 +41,7 @@ using namespace pxr;
 // and a description...
 TF_DEFINE_ENV_SETTING(
     Hd_RUZINO_SAMPLES_TO_CONVERGENCE,
-    256,
+    100,
     "Samples per pixel before we stop rendering (must be >= 1)");
 
 TF_DEFINE_ENV_SETTING(

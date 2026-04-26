@@ -1,8 +1,6 @@
 #define _SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING
 
 #include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <future>
@@ -19,7 +17,6 @@
 #include "GCore/algorithms/intersection.h"
 #include "RHI/rhi.hpp"
 #include "cmdparser.hpp"
-#include "nodes/core/io/json.hpp"
 #include "nodes/system/node_system.hpp"
 #include "render_util.hpp"
 #include "stage/stage.hpp"
@@ -53,7 +50,6 @@
 // USD Hio for HDR/EXR support
 
 #ifdef _WIN32
-#include <crtdbg.h>
 #include <gl/GL.h>
 #include <windows.h>
 
@@ -64,76 +60,6 @@ using namespace pxr;
 using namespace RenderUtil;
 
 namespace {
-
-#ifdef _WIN32
-LONG WINAPI HeadlessUnhandledExceptionFilter(
-    EXCEPTION_POINTERS* exception_info)
-{
-    if (exception_info && exception_info->ExceptionRecord) {
-        const auto* record = exception_info->ExceptionRecord;
-        std::fprintf(
-            stderr,
-            "headless_render unhandled SEH exception: code=0x%08lx address=%p",
-            static_cast<unsigned long>(record->ExceptionCode),
-            record->ExceptionAddress);
-
-        MEMORY_BASIC_INFORMATION memory_info = {};
-        if (VirtualQuery(
-                record->ExceptionAddress,
-                &memory_info,
-                sizeof(memory_info)) == sizeof(memory_info) &&
-            memory_info.AllocationBase) {
-            char module_path[MAX_PATH] = {};
-            if (GetModuleFileNameA(
-                    static_cast<HMODULE>(memory_info.AllocationBase),
-                    module_path,
-                    MAX_PATH) > 0) {
-                const auto module_offset =
-                    reinterpret_cast<uintptr_t>(record->ExceptionAddress) -
-                    reinterpret_cast<uintptr_t>(memory_info.AllocationBase);
-                std::fprintf(
-                    stderr,
-                    " module=%s+0x%llx",
-                    module_path,
-                    static_cast<unsigned long long>(module_offset));
-            }
-        }
-
-        if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
-            record->NumberParameters >= 2) {
-            std::fprintf(
-                stderr,
-                " access_type=%llu fault_address=%p",
-                static_cast<unsigned long long>(
-                    record->ExceptionInformation[0]),
-                reinterpret_cast<const void*>(
-                    record->ExceptionInformation[1]));
-        }
-
-        std::fprintf(stderr, "\n");
-        std::fflush(stderr);
-    }
-
-    return EXCEPTION_EXECUTE_HANDLER;
-}
-
-void ConfigureHeadlessCrashReporting()
-{
-    SetErrorMode(
-        SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
-        SEM_NOOPENFILEERRORBOX);
-    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-    _set_error_mode(_OUT_TO_STDERR);
-    _CrtSetReportMode(_CRT_ASSERT, 0);
-    _CrtSetReportMode(_CRT_ERROR, 0);
-    _CrtSetReportMode(_CRT_WARN, 0);
-    SetUnhandledExceptionFilter(HeadlessUnhandledExceptionFilter);
-}
-#else
-void ConfigureHeadlessCrashReporting()
-{
-}
-#endif
 
 HgiFormat ConvertNvrhiFormatToHgiFormatForHeadlessSave(nvrhi::Format format)
 {
@@ -162,13 +88,8 @@ bool ReadTextureFromRenderNodeSystem(
     int width,
     int height,
     std::vector<uint8_t>& texture_data,
-    HgiFormat& texture_format,
-    bool* fatal_failure = nullptr)
+    HgiFormat& texture_format)
 {
-    if (fatal_failure) {
-        *fatal_failure = false;
-    }
-
     auto value = renderer->GetRendererSetting(pxr::TfToken("RenderNodeSystem"));
     if (!value.IsHolding<const void*>()) {
         spdlog::warn("RenderNodeSystem renderer setting is unavailable");
@@ -216,14 +137,6 @@ bool ReadTextureFromRenderNodeSystem(
         nvrhi::Format nvrhi_format = nvrhi::Format::UNKNOWN;
         if (!ReadTextureHandleDirectly(
                 texture, width, height, texture_data, &nvrhi_format)) {
-            if (fatal_failure) {
-                *fatal_failure = true;
-            }
-            spdlog::error(
-                "RenderNodeSystem texture readback failed for node '{}' ({}) after obtaining a valid texture handle",
-                node->ui_name.empty() ? node->typeinfo->id_name.c_str()
-                                      : node->ui_name.c_str(),
-                socket_role);
             return false;
         }
 
@@ -259,16 +172,10 @@ bool ReadTextureFromRenderNodeSystem(
                 if (try_socket(node.get(), input, "input")) {
                     return true;
                 }
-                if (fatal_failure && *fatal_failure) {
-                    return false;
-                }
             }
             for (auto* output : node->get_outputs()) {
                 if (try_socket(node.get(), output, "output")) {
                     return true;
-                }
-                if (fatal_failure && *fatal_failure) {
-                    return false;
                 }
             }
         }
@@ -282,16 +189,10 @@ bool ReadTextureFromRenderNodeSystem(
             if (try_socket(node.get(), input, "generic input")) {
                 return true;
             }
-            if (fatal_failure && *fatal_failure) {
-                return false;
-            }
         }
         for (auto* output : node->get_outputs()) {
             if (try_socket(node.get(), output, "generic output")) {
                 return true;
-            }
-            if (fatal_failure && *fatal_failure) {
-                return false;
             }
         }
     }
@@ -363,123 +264,6 @@ bool ConfigureHeadlessRenderNodeSystem(
     return updated_any_socket;
 }
 
-bool ReadHeadlessAccumulateSampleBudget(
-    UsdImagingGLEngine* renderer,
-    int& max_samples)
-{
-    auto value = renderer->GetRendererSetting(pxr::TfToken("RenderNodeSystem"));
-    if (!value.IsHolding<const void*>()) {
-        return false;
-    }
-
-    auto node_system_ptr =
-        static_cast<const std::shared_ptr<NodeSystem>*>(value.Get<const void*>());
-    if (!node_system_ptr || !(*node_system_ptr)) {
-        return false;
-    }
-
-    auto node_system = *node_system_ptr;
-    auto* tree = node_system->get_node_tree();
-    if (!tree) {
-        return false;
-    }
-
-    for (auto&& node : tree->nodes) {
-        if (!node || std::string(node->typeinfo->id_name) != "accumulate") {
-            continue;
-        }
-
-        auto* max_samples_socket = node->get_input_socket("Max Samples");
-        if (!max_samples_socket || !max_samples_socket->dataField.value ||
-            !max_samples_socket->dataField.value.allow_cast<int>()) {
-            continue;
-        }
-
-        max_samples = max_samples_socket->dataField.value.cast<int>();
-        return true;
-    }
-
-    return false;
-}
-
-bool ReadRendererIntSetting(
-    UsdImagingGLEngine* renderer,
-    const pxr::TfToken& key,
-    int& value_out)
-{
-    auto value = renderer->GetRendererSetting(key);
-    if (!value.IsHolding<int>()) {
-        return false;
-    }
-
-    value_out = value.UncheckedGet<int>();
-    return true;
-}
-
-bool ReadAccumulateSampleBudgetFromJson(
-    const std::string& json_script_path,
-    int& max_samples)
-{
-    if (json_script_path.empty() || !std::filesystem::exists(json_script_path)) {
-        return false;
-    }
-
-    try {
-        const auto json = nlohmann::json::parse(LoadJSONScript(json_script_path));
-        auto nodes_info_it = json.find("nodes_info");
-        auto sockets_info_it = json.find("sockets_info");
-        if (nodes_info_it == json.end() || sockets_info_it == json.end() ||
-            !nodes_info_it->is_object() || !sockets_info_it->is_object()) {
-            return false;
-        }
-
-        for (const auto& [_, node_info] : nodes_info_it->items()) {
-            auto id_name_it = node_info.find("id_name");
-            auto inputs_it = node_info.find("inputs");
-            if (id_name_it == node_info.end() || inputs_it == node_info.end() ||
-                !id_name_it->is_string() || !inputs_it->is_object() ||
-                id_name_it->get<std::string>() != "accumulate") {
-                continue;
-            }
-
-            for (const auto& [__, socket_id_json] : inputs_it->items()) {
-                if (!socket_id_json.is_number_integer()) {
-                    continue;
-                }
-
-                const auto socket_key =
-                    std::to_string(socket_id_json.get<int>());
-                auto socket_info_it = sockets_info_it->find(socket_key);
-                if (socket_info_it == sockets_info_it->end() ||
-                    !socket_info_it->is_object()) {
-                    continue;
-                }
-
-                auto identifier_it = socket_info_it->find("identifier");
-                auto value_it = socket_info_it->find("value");
-                if (identifier_it == socket_info_it->end() ||
-                    value_it == socket_info_it->end() ||
-                    !identifier_it->is_string() ||
-                    identifier_it->get<std::string>() != "Max Samples" ||
-                    !value_it->is_number_integer()) {
-                    continue;
-                }
-
-                max_samples = value_it->get<int>();
-                return true;
-            }
-        }
-    }
-    catch (const std::exception& e) {
-        spdlog::warn(
-            "Failed to parse headless render graph '{}' for sample budget: {}",
-            json_script_path,
-            e.what());
-    }
-
-    return false;
-}
-
 bool ReadEmbreeRenderBuffer(
     UsdImagingGLEngine* renderer,
     int width,
@@ -542,68 +326,6 @@ bool ReadEmbreeRenderBuffer(
     return true;
 }
 
-bool ReadRuzinoRenderBuffer(
-    UsdImagingGLEngine* renderer,
-    int width,
-    int height,
-    std::vector<uint8_t>& texture_data,
-    HgiFormat& texture_format)
-{
-    auto value =
-        renderer->GetRendererSetting(pxr::TfToken("RuzinoColorAovRenderBuffer"));
-    if (!value.IsHolding<const void*>()) {
-        spdlog::warn("RuzinoColorAovRenderBuffer renderer setting is unavailable");
-        return false;
-    }
-
-    auto* render_buffer =
-        reinterpret_cast<HdRenderBuffer*>(const_cast<void*>(value.Get<const void*>()));
-    if (!render_buffer) {
-        spdlog::warn("RuzinoColorAovRenderBuffer renderer setting returned null");
-        return false;
-    }
-
-    if (render_buffer->GetWidth() != width ||
-        render_buffer->GetHeight() != height) {
-        spdlog::warn(
-            "Ruzino color render buffer size mismatch: expected {}x{}, got {}x{}",
-            width,
-            height,
-            render_buffer->GetWidth(),
-            render_buffer->GetHeight());
-        return false;
-    }
-
-    const HdFormat hd_format = render_buffer->GetFormat();
-    texture_format = ConvertHdFormatToHgiFormatForHeadlessSave(hd_format);
-    if (texture_format == HgiFormatInvalid) {
-        spdlog::warn(
-            "Unsupported Ruzino color render buffer HdFormat={}",
-            static_cast<int>(hd_format));
-        return false;
-    }
-
-    render_buffer->Resolve();
-    void* mapped = render_buffer->Map();
-    if (!mapped) {
-        spdlog::warn("Failed to map Ruzino color render buffer");
-        return false;
-    }
-
-    const size_t buffer_size = static_cast<size_t>(render_buffer->GetWidth()) *
-                               static_cast<size_t>(render_buffer->GetHeight()) *
-                               HdDataSizeOfFormat(hd_format);
-    texture_data.resize(buffer_size);
-    memcpy(texture_data.data(), mapped, buffer_size);
-    render_buffer->Unmap();
-
-    spdlog::info(
-        "Recovered texture from Ruzino render buffer (HdFormat={}, bytes={})",
-        static_cast<int>(hd_format),
-        buffer_size);
-    return true;
-}
-
 bool HasPublishedVulkanColorAov(UsdImagingGLEngine* renderer)
 {
     auto hacked_handle = renderer->GetRendererSetting(pxr::TfToken("VulkanColorAov"));
@@ -633,7 +355,6 @@ bool ReadCompletedSamples(
 
 int main(int argc, char* argv[])
 {
-    ConfigureHeadlessCrashReporting();
     python::initialize();
 
     // 禁止 abort 弹窗，改为直接退出
@@ -657,12 +378,7 @@ int main(int argc, char* argv[])
         "output", 'o', "Output image filename (PNG/HDR/EXR)", true);
     parser.add<int>("width", 'w', "Image width", false, 1920);
     parser.add<int>("height", 'h', "Image height", false, 1080);
-    parser.add<int>(
-        "spp",
-        's',
-        "Samples per pixel (0 = use renderer/graph default for GUI-aligned quality)",
-        false,
-        0);
+    parser.add<int>("spp", 's', "Samples per pixel", false, 16);
     parser.add<std::string>(
         "camera", 'c', "Camera prim path (e.g., /Camera)", false, "");
     parser.add<int>(
@@ -707,7 +423,7 @@ int main(int argc, char* argv[])
     std::string output_image = parser.get<std::string>("output");
     int width = parser.get<int>("width");
     int height = parser.get<int>("height");
-    int requested_spp = parser.get<int>("spp");
+    int spp = parser.get<int>("spp");
     std::string camera_path = parser.get<std::string>("camera");
     int renderer_index = parser.get<int>("renderer");
     bool verbose = parser.exist("verbose");
@@ -716,23 +432,13 @@ int main(int argc, char* argv[])
     int num_frames = parser.get<int>("frames");
     float fps = parser.get<float>("fps");
     float delta_time = 1.0f / fps;
-    int auto_graph_spp = 0;
 
     // Keep the runtime renderer's internal progressive loop aligned with the
     // CLI-facing spp argument used by headless validation.
-    if (requested_spp <= 0) {
-        ReadAccumulateSampleBudgetFromJson(json_script, auto_graph_spp);
-    }
-    if (requested_spp > 0 || auto_graph_spp > 0) {
-        const int env_spp = std::max(
-            1, requested_spp > 0 ? requested_spp : auto_graph_spp);
-        pxr::TfSetenv(
-            "Hd_RUZINO_SAMPLES_TO_CONVERGENCE",
-            std::to_string(env_spp).c_str());
-        pxr::TfSetenv(
-            "HDEMBREE_SAMPLES_TO_CONVERGENCE",
-            std::to_string(env_spp).c_str());
-    }
+    pxr::TfSetenv(
+        "Hd_RUZINO_SAMPLES_TO_CONVERGENCE", std::to_string(std::max(1, spp)).c_str());
+    pxr::TfSetenv(
+        "HDEMBREE_SAMPLES_TO_CONVERGENCE", std::to_string(std::max(1, spp)).c_str());
 
     // Validate input files
     if (!std::filesystem::exists(usd_file)) {
@@ -750,11 +456,7 @@ int main(int argc, char* argv[])
     spdlog::info("JSON script: {}", json_script);
     spdlog::info("Output image: {}", output_image);
     spdlog::info("Resolution: {}x{}", width, height);
-    spdlog::info("Requested SPP: {}", requested_spp);
-    if (requested_spp <= 0 && auto_graph_spp > 0) {
-        spdlog::info(
-            "Auto SPP from render graph accumulate node: {}", auto_graph_spp);
-    }
+    spdlog::info("SPP: {}", spp);
 
     try {
         // Initialize RHI first (headless mode, with DX12 backend)
@@ -837,7 +539,6 @@ int main(int argc, char* argv[])
             (selected_renderer == 0 && !is_ruzino_renderer);
         bool needs_convergence_wait =
             is_ruzino_renderer || is_ruzino_embree_renderer;
-        int target_spp = requested_spp;
 
         renderer->SetEnablePresentation(false);
 
@@ -881,24 +582,12 @@ int main(int argc, char* argv[])
                 std::string nodes_json = LoadJSONScript(json_script);
                 (*node_system)->get_node_tree()->deserialize(nodes_json);
                 spdlog::info("Loaded JSON script: {}", json_script);
-                if (is_ruzino_renderer && target_spp > 0) {
+                if (is_ruzino_renderer) {
                     ConfigureHeadlessRenderNodeSystem(
-                        renderer.get(), std::max(1, target_spp));
+                        renderer.get(), std::max(1, spp));
                 }
             }
         }
-
-        if (target_spp <= 0 && is_ruzino_renderer) {
-            ReadHeadlessAccumulateSampleBudget(renderer.get(), target_spp);
-        }
-        if (target_spp <= 0) {
-            ReadRendererIntSetting(
-                renderer.get(),
-                HdRenderSettingsTokens->convergedSamplesPerPixel,
-                target_spp);
-        }
-        target_spp = std::max(1, target_spp);
-        spdlog::info("Resolved headless sample budget: {}", target_spp);
 
         GlfSimpleLightVector lights;
 
@@ -938,7 +627,7 @@ int main(int argc, char* argv[])
                 delta_time,
                 fps);
         }
-        printf("Samples per pixel: %d\n", target_spp);
+        printf("Samples per pixel: %d\n", spp);
         fflush(stdout);
 
         // Track async save operations
@@ -995,13 +684,13 @@ int main(int argc, char* argv[])
                             int completed_samples = 0;
                             if (ReadCompletedSamples(
                                     renderer.get(), completed_samples) &&
-                                completed_samples >= target_spp) {
+                                completed_samples >= std::max(1, spp)) {
                                 spdlog::info(
                                     "headless_render accepted renderer sample completion "
                                     "without Hydra convergence "
                                     "(completed_samples={}, target_samples={}, published_texture_seen={})",
                                     completed_samples,
-                                    target_spp,
+                                    std::max(1, spp),
                                     saw_published_texture);
                                 break;
                             }
@@ -1017,12 +706,13 @@ int main(int argc, char* argv[])
                     }
                 }
 
-                // Wait for idle before readback so the current progressive
-                // frame is finished, but keep cleanup deferred until after
-                // texture extraction.
+                // Wait for idle and cleanup only for Ruzino renderer
                 if (is_ruzino_renderer) {
                     RHI::get_device()->waitForIdle();
+                    RHI::get_device()->runGarbageCollection();
                 }
+
+                renderer->StopRenderer();
 
                 auto sample_end = std::chrono::high_resolution_clock::now();
                 auto sample_duration =
@@ -1037,7 +727,7 @@ int main(int argc, char* argv[])
                     if (show_progress) {
                         printf(
                             "Sample 1/%d completed in %.2fs (warmup)\n",
-                            target_spp,
+                            spp,
                             sample_duration / 1000.0);
                         fflush(stdout);
                     }
@@ -1050,16 +740,16 @@ int main(int argc, char* argv[])
                 if (show_progress && is_ruzino_renderer) {
                     // Calculate progress and ETA (based on samples after
                     // warmup)
-                    int progress_percent = ((sample + 1) * 100) / target_spp;
+                    int progress_percent = ((sample + 1) * 100) / spp;
                     double avg_time_per_sample =
                         (double)total_sample_time / timed_samples;
-                    int remaining_samples = target_spp - (sample + 1);
+                    int remaining_samples = spp - (sample + 1);
                     double eta_seconds =
                         (avg_time_per_sample * remaining_samples) / 1000.0;
 
                     // Create progress bar
                     const int bar_width = 40;
-                    int filled = (bar_width * (sample + 1)) / target_spp;
+                    int filled = (bar_width * (sample + 1)) / spp;
                     char bar[bar_width + 1];
                     memset(bar, ' ', bar_width);
                     for (int i = 0; i < filled; ++i) {
@@ -1086,7 +776,7 @@ int main(int argc, char* argv[])
                             bar,
                             progress_percent,
                             sample + 1,
-                            target_spp,
+                            spp,
                             sample_duration / 1000.0,
                             avg_time_per_sample / 1000.0);
                     }
@@ -1096,7 +786,7 @@ int main(int argc, char* argv[])
                             bar,
                             progress_percent,
                             sample + 1,
-                            target_spp,
+                            spp,
                             sample_duration / 1000.0,
                             avg_time_per_sample / 1000.0);
                     }
@@ -1175,23 +865,12 @@ int main(int argc, char* argv[])
             }
 
             bool success = false;
-            bool fatal_readback_failure = false;
-            if (is_ruzino_renderer) {
-                success = ReadRuzinoRenderBuffer(
-                    renderer.get(), width, height, texture_data, texture_format);
-            }
-
-            // Match the GUI display path for renderers exposing presented
-            // textures via RenderNodeSystem when the CPU render buffer path is
-            // unavailable.
-            if (!success && (is_ruzino_renderer || is_ruzino_gl_renderer)) {
+            // Match the GUI display path first for Ruzino renderers: prefer the
+            // final presented texture produced by the render-node graph instead
+            // of a generic Hydra color AOV that may bypass tonemapping/gamma.
+            if (is_ruzino_renderer || is_ruzino_gl_renderer) {
                 success = ReadTextureFromRenderNodeSystem(
-                    renderer.get(),
-                    width,
-                    height,
-                    texture_data,
-                    texture_format,
-                    &fatal_readback_failure);
+                    renderer.get(), width, height, texture_data, texture_format);
             }
 
             if (!success && is_ruzino_embree_renderer) {
@@ -1199,12 +878,12 @@ int main(int argc, char* argv[])
                     renderer.get(), width, height, texture_data, texture_format);
             }
 
-            if (!success && !fatal_readback_failure) {
+            if (!success) {
                 success = ReadTextureDirectly(
                     renderer.get(), width, height, texture_data);
             }
 
-            if (!success && !fatal_readback_failure) {
+            if (!success) {
                 success = ReadTextureCPU(
                     renderer.get(), hgi, width, height, texture_data);
             }
@@ -1212,12 +891,6 @@ int main(int argc, char* argv[])
             if (!success) {
                 throw std::runtime_error(
                     "Failed to read back rendered texture");
-            }
-
-            if (is_ruzino_renderer) {
-                renderer->StopRenderer();
-                RHI::get_device()->waitForIdle();
-                RHI::get_device()->runGarbageCollection();
             }
 
             // Generate output filename for this frame
@@ -1297,15 +970,11 @@ int main(int argc, char* argv[])
 #endif
         // Shutdown RHI at the end
         printf("Successfully finished all operations.\n");
-        fflush(stdout);
-        fflush(stderr);
-        std::_Exit(0);
+        return 0;
     }
     catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
-        std::fflush(stderr);
-        std::fflush(stdout);
-        std::_Exit(1);
+        return 1;
     }
 
     python::finalize();

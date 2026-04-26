@@ -22,8 +22,6 @@ NODE_DECLARATION_FUNCTION(ssao)
 NODE_EXECUTION_FUNCTION(ssao)
 {
     auto color = params.get_input<GLTextureHandle>("Color");
-    auto position = params.get_input<GLTextureHandle>("Position");
-    auto depth = params.get_input<GLTextureHandle>("Depth");
 
     auto size = color->desc.size;
 
@@ -62,22 +60,11 @@ NODE_EXECUTION_FUNCTION(ssao)
     shader->shader.use();
     shader->shader.setVec2("iResolution", size);
 
-    shader->shader.setInt("colorTex", 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, color->texture_id);
-
-    shader->shader.setInt("positionTex", 1);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, position->texture_id);
-
-    shader->shader.setInt("depthTex", 2);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, depth->texture_id);
+    // HW6: Bind the textures like other passes here.
 
     glBindVertexArray(VAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
-    glBindTexture(GL_TEXTURE_2D, 0);
     DestroyFullScreenVAO(VAO, VBO);
     resource_allocator.destroy(shader);
 
