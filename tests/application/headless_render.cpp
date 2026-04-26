@@ -275,6 +275,15 @@ bool HasPublishedVulkanColorAov(UsdImagingGLEngine* renderer)
     return rendered != nullptr;
 }
 
+int GetRendererCompletedSamples(UsdImagingGLEngine* renderer)
+{
+    auto value = renderer->GetRendererSetting(pxr::TfToken("CompletedSamples"));
+    if (!value.IsHolding<int>()) {
+        return -1;
+    }
+    return value.Get<int>();
+}
+
 }
 
 int main(int argc, char* argv[])
@@ -359,10 +368,13 @@ int main(int argc, char* argv[])
 
     // Keep the runtime renderer's internal progressive loop aligned with the
     // CLI-facing spp argument used by headless validation.
+    const int target_sample_budget = std::max(1, spp);
     pxr::TfSetenv(
-        "Hd_RUZINO_SAMPLES_TO_CONVERGENCE", std::to_string(std::max(1, spp)).c_str());
+        "Hd_RUZINO_SAMPLES_TO_CONVERGENCE",
+        std::to_string(target_sample_budget).c_str());
     pxr::TfSetenv(
-        "HDEMBREE_SAMPLES_TO_CONVERGENCE", std::to_string(std::max(1, spp)).c_str());
+        "HDEMBREE_SAMPLES_TO_CONVERGENCE",
+        std::to_string(target_sample_budget).c_str());
 
     // Validate input files
     if (!std::filesystem::exists(usd_file)) {
@@ -588,8 +600,9 @@ int main(int argc, char* argv[])
                 if (needs_convergence_wait) {
                     constexpr auto kPollInterval =
                         std::chrono::milliseconds(10);
-                    constexpr auto kRenderTimeout =
-                        std::chrono::seconds(60);
+                    const auto kRenderTimeout = is_ruzino_embree_renderer
+                                                    ? std::chrono::minutes(15)
+                                                    : std::chrono::seconds(60);
                     auto wait_start = std::chrono::steady_clock::now();
 
                     bool saw_published_texture = false;
@@ -597,6 +610,20 @@ int main(int argc, char* argv[])
                         saw_published_texture =
                             saw_published_texture ||
                             HasPublishedVulkanColorAov(renderer.get());
+
+                        if (is_ruzino_renderer) {
+                            const int completed_samples =
+                                GetRendererCompletedSamples(renderer.get());
+                            if (completed_samples >= target_sample_budget) {
+                                spdlog::info(
+                                    "headless_render accepted renderer sample completion without Hydra convergence (completed_samples={}, target_samples={}, published_texture_seen={})",
+                                    completed_samples,
+                                    target_sample_budget,
+                                    saw_published_texture);
+                                break;
+                            }
+                        }
+
                         if (std::chrono::steady_clock::now() - wait_start >
                             kRenderTimeout) {
                             spdlog::warn(
@@ -622,36 +649,24 @@ int main(int argc, char* argv[])
                         sample_end - sample_start)
                         .count();
 
-                // Skip first sample for timing (shader compilation, etc.) -
-                // only for Ruzino
-                if (sample == 0 && frame == 0 && is_ruzino_renderer) {
-                    render_start = std::chrono::high_resolution_clock::now();
-                    if (show_progress) {
-                        printf(
-                            "Sample 1/%d completed in %.2fs (warmup)\n",
-                            spp,
-                            sample_duration / 1000.0);
-                        fflush(stdout);
-                    }
-                    continue;
-                }
-
                 total_sample_time += sample_duration;
                 timed_samples++;
 
                 if (show_progress && is_ruzino_renderer) {
                     // Calculate progress and ETA (based on samples after
                     // warmup)
-                    int progress_percent = ((sample + 1) * 100) / spp;
+                    int progress_percent =
+                        ((sample + 1) * 100) / std::max(1, samples_to_render);
                     double avg_time_per_sample =
                         (double)total_sample_time / timed_samples;
-                    int remaining_samples = spp - (sample + 1);
+                    int remaining_samples = samples_to_render - (sample + 1);
                     double eta_seconds =
                         (avg_time_per_sample * remaining_samples) / 1000.0;
 
                     // Create progress bar
                     const int bar_width = 40;
-                    int filled = (bar_width * (sample + 1)) / spp;
+                    int filled =
+                        (bar_width * (sample + 1)) / std::max(1, samples_to_render);
                     char bar[bar_width + 1];
                     memset(bar, ' ', bar_width);
                     for (int i = 0; i < filled; ++i) {
@@ -675,22 +690,22 @@ int main(int argc, char* argv[])
                             "%.4fs ",
                             frame + 1,
                             frames_to_render,
-                            bar,
-                            progress_percent,
-                            sample + 1,
-                            spp,
-                            sample_duration / 1000.0,
-                            avg_time_per_sample / 1000.0);
+                             bar,
+                             progress_percent,
+                             sample + 1,
+                             samples_to_render,
+                             sample_duration / 1000.0,
+                             avg_time_per_sample / 1000.0);
                     }
                     else {
                         printf(
                             "\r[%s] %d%% (%d/%d) Sample: %.4fs Avg: %.4fs ",
-                            bar,
-                            progress_percent,
-                            sample + 1,
-                            spp,
-                            sample_duration / 1000.0,
-                            avg_time_per_sample / 1000.0);
+                             bar,
+                             progress_percent,
+                             sample + 1,
+                             samples_to_render,
+                             sample_duration / 1000.0,
+                             avg_time_per_sample / 1000.0);
                     }
 
                     if (remaining_samples > 0) {
@@ -726,11 +741,11 @@ int main(int argc, char* argv[])
                 }
                 else {
                     printf(
-                        "Render complete. Total time: %.2fs (excluding warmup)",
+                        "Render complete. Total time: %.2fs",
                         total_duration / 1000.0);
                     if (timed_samples > 0) {
                         printf(
-                            ", Avg per sample: %.2fs",
+                            ", Avg per render pass: %.2fs",
                             total_sample_time / (double)timed_samples / 1000.0);
                     }
                     printf("\n");

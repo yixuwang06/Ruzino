@@ -351,6 +351,11 @@ void Hd_RUZINO_Renderer::SetAovBindings(
     _aovBindingsNeedValidation = true;
 }
 
+int Hd_RUZINO_Renderer::GetCompletedSamples() const
+{
+    return _completedSamples.load();
+}
+
 void Hd_RUZINO_Renderer::MarkAovBuffersUnconverged()
 {
     for (size_t i = 0; i < _aovBindings.size(); ++i) {
