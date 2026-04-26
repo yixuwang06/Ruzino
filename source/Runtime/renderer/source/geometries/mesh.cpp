@@ -460,6 +460,10 @@ void Hd_RUZINO_Mesh::updateTLAS(
         _primvarSourceMap.find(TfToken("subset_material_id")) !=
         _primvarSourceMap.end();
 
+    if (has_subset_materials && subset_materials_cover_all_faces_) {
+        material_id = SdfPath();
+    }
+
     if (material_id.IsEmpty()) {
         if (!has_subset_materials) {
             spdlog::info(
@@ -629,6 +633,7 @@ void Hd_RUZINO_Mesh::Sync(
                 &triangulatedIndices, &trianglePrimitiveParams);
 
             auto& geom_subsets = topology.GetGeomSubsets();
+            subset_materials_cover_all_faces_ = false;
 
             // Triangulate all FaceVarying primvars including normals
             for (auto& primvar : _primvarSourceMap) {
@@ -760,6 +765,10 @@ void Hd_RUZINO_Mesh::Sync(
                         subset_material_id_map[face_id] = material_id;
                     }
                 }
+
+                subset_materials_cover_all_faces_ =
+                    subset_material_id_map.size() ==
+                    topology.GetFaceVertexCounts().size();
 
                 // Initialize with max uint to indicate "use instance material"
                 // (equivalent to -1 in signed)

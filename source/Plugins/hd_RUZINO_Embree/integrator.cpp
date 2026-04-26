@@ -270,16 +270,21 @@ Color Integrator::EstimateDirectLight(
     SurfaceInteraction& si,
     const std::function<float()>& uniform_float)
 {
-    // Sample the lights.
-    GfVec3f wi;
-    float sample_light_pdf;
-    GfVec3f sampled_light_pos;
-    auto sample_light_luminance = SampleLights(
-        si.position, wi, sampled_light_pos, sample_light_pdf, uniform_float);
-    auto brdfVal = si.Eval(wi);
-    GfVec3f contribution_by_sample_lights{ 0 };
+    constexpr int kDirectLightSamples = 4;
+    GfVec3f accumulatedContribution{ 0.0f };
 
-    if (sample_light_pdf > 0.0f) {
+    for (int sampleIndex = 0; sampleIndex < kDirectLightSamples; ++sampleIndex) {
+        GfVec3f wi;
+        float sample_light_pdf = 0.0f;
+        GfVec3f sampled_light_pos;
+        auto sample_light_luminance = SampleLights(
+            si.position, wi, sampled_light_pos, sample_light_pdf, uniform_float);
+        auto brdfVal = si.Eval(wi);
+
+        if (sample_light_pdf <= 0.0f) {
+            continue;
+        }
+
         GfVec3f shadowOrigin =
             si.position +
             0.001f *
@@ -289,17 +294,17 @@ Color Integrator::EstimateDirectLight(
         GfVec3f shadowTarget = sampled_light_pos - wi * 0.001f;
 
         if (!this->VisibilityTest(shadowOrigin, shadowTarget)) {
-            return contribution_by_sample_lights;
+            continue;
         }
 
-        contribution_by_sample_lights =
+        accumulatedContribution +=
             GfCompMult(sample_light_luminance, brdfVal) *
             abs(GfDot(si.shadingNormal, wi)) / sample_light_pdf;
     }
 
     // HW7_TODO: Sample BRDF (optional)
 
-    return contribution_by_sample_lights;
+    return accumulatedContribution / float(kDirectLightSamples);
 }
 
 void SamplingIntegrator::_writeBuffer(unsigned x, unsigned y, VtValue color)

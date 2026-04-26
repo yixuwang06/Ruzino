@@ -1,6 +1,7 @@
-// #define __GNUC__
-
 #include "material.h"
+
+#include <algorithm>
+#include <cmath>
 
 #include <spdlog/spdlog.h>
 
@@ -16,6 +17,78 @@
 
 RUZINO_NAMESPACE_OPEN_SCOPE
 using namespace pxr;
+
+namespace {
+
+float Saturate(float x)
+{
+    return std::clamp(x, 0.0f, 1.0f);
+}
+
+GfVec3f Saturate(const GfVec3f& v)
+{
+    return GfVec3f(Saturate(v[0]), Saturate(v[1]), Saturate(v[2]));
+}
+
+float MaxComponent(const GfVec3f& v)
+{
+    return std::max(v[0], std::max(v[1], v[2]));
+}
+
+float SafePow(float base, float exponent)
+{
+    return std::pow(std::max(base, 0.0f), exponent);
+}
+
+float RoughnessToPhongExponent(float roughness)
+{
+    roughness = std::clamp(roughness, 0.04f, 1.0f);
+    return std::max(1.0f, 2.0f / (roughness * roughness) - 2.0f);
+}
+
+GfVec3f ReflectAboutNormal(const GfVec3f& v)
+{
+    return GfVec3f(-v[0], -v[1], v[2]);
+}
+
+GfVec3f FresnelSchlick(const GfVec3f& f0, float cosTheta)
+{
+    float factor = SafePow(1.0f - Saturate(cosTheta), 5.0f);
+    return f0 + (GfVec3f(1.0f) - f0) * factor;
+}
+
+float FresnelFromIor(float ior)
+{
+    float eta = std::max(1.01f, ior);
+    float f = (eta - 1.0f) / (eta + 1.0f);
+    return f * f;
+}
+
+float SpecularSampleProbability(
+    const GfVec3f& f0,
+    float roughness,
+    float metallic)
+{
+    float probability =
+        MaxComponent(f0) + (1.0f - roughness) * 0.5f + metallic * 0.25f;
+    return std::clamp(probability, 0.05f, 0.95f);
+}
+
+float DiffusePdf(const GfVec3f& wi)
+{
+    return wi[2] > 0.0f ? wi[2] / M_PI : 0.0f;
+}
+
+float GlossyPdf(const GfVec3f& wi, const GfVec3f& reflection, float exponent)
+{
+    float alignment = GfDot(reflection, wi);
+    if (wi[2] <= 0.0f || alignment <= 0.0f) {
+        return 0.0f;
+    }
+    return ((exponent + 1.0f) / (2.0f * M_PI)) * SafePow(alignment, exponent);
+}
+
+}  // namespace
 
 // Here for the cource purpose, we support a very limited set of forms of the
 // material. Specifically, we support only UsdPreviewSurface, and each input can
@@ -231,26 +304,98 @@ Color Hd_RUZINO_Material::Sample(
     GfVec2f texcoord,
     const std::function<float()>& uniform_float)
 {
+    auto record = SampleMaterialRecord(texcoord);
+    const GfVec3f baseColor = Saturate(record.diffuseColor);
+    const float roughness = std::clamp(record.roughness, 0.04f, 1.0f);
+    const float metallic = Saturate(record.metallic);
+    const float dielectricF0 = FresnelFromIor(record.ior);
+    const GfVec3f f0 = (1.0f - metallic) * GfVec3f(dielectricF0) +
+                       metallic * baseColor;
+    const float specularProb =
+        SpecularSampleProbability(f0, roughness, metallic);
+
     auto sample2D = GfVec2f{ uniform_float(), uniform_float() };
 
-    wi = CosineWeightedDirection(sample2D, pdf);
+    if (uniform_float() < specularProb) {
+        const float exponent = RoughnessToPhongExponent(roughness);
+        const GfVec3f reflection = ReflectAboutNormal(wo).GetNormalized();
+        const GfMatrix3f basis = constructONB(reflection);
+
+        const float phi = 2.0f * M_PI * sample2D[0];
+        const float cosTheta = SafePow(sample2D[1], 1.0f / (exponent + 1.0f));
+        const float sinTheta =
+            std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
+        wi = basis * GfVec3f(
+                        std::cos(phi) * sinTheta,
+                        std::sin(phi) * sinTheta,
+                        cosTheta);
+        if (wi[2] <= 0.0f) {
+            wi = CosineWeightedDirection(sample2D, pdf);
+        }
+    }
+    else {
+        wi = CosineWeightedDirection(sample2D, pdf);
+    }
+
+    pdf = Pdf(wi, wo, texcoord);
     return Eval(wi, wo, texcoord);
 }
 
 Color Hd_RUZINO_Material::Eval(GfVec3f wi, GfVec3f wo, GfVec2f texcoord)
 {
+    if (wi[2] <= 0.0f || wo[2] <= 0.0f) {
+        return GfVec3f(0.0f);
+    }
+
     auto record = SampleMaterialRecord(texcoord);
+    const GfVec3f baseColor = Saturate(record.diffuseColor);
+    const float roughness = std::clamp(record.roughness, 0.04f, 1.0f);
+    const float metallic = Saturate(record.metallic);
+    const float dielectricF0 = FresnelFromIor(record.ior);
 
-    GfVec3f diffuseColor = record.diffuseColor;
+    const GfVec3f f0 = (1.0f - metallic) * GfVec3f(dielectricF0) +
+                       metallic * baseColor;
+    const GfVec3f kd = (1.0f - metallic) * baseColor;
 
-    GfVec3f result = diffuseColor / M_PI;
+    GfVec3f result = kd / M_PI;
+
+    const GfVec3f reflection = ReflectAboutNormal(wo).GetNormalized();
+    const float reflectionAlignment = std::max(0.0f, GfDot(reflection, wi));
+    if (reflectionAlignment > 0.0f) {
+        const float exponent = RoughnessToPhongExponent(roughness);
+        const GfVec3f halfVector = (wi + wo).GetNormalized();
+        const float voh = std::max(0.0f, GfDot(wo, halfVector));
+        const GfVec3f fresnel = FresnelSchlick(f0, voh);
+        const float normalizedPhong =
+            ((exponent + 2.0f) / (2.0f * M_PI)) *
+            SafePow(reflectionAlignment, exponent);
+        result += fresnel * normalizedPhong;
+    }
 
     return result;
 }
 
 float Hd_RUZINO_Material::Pdf(GfVec3f wi, GfVec3f wo, GfVec2f texcoord)
 {
-    return 0;
+    if (wi[2] <= 0.0f || wo[2] <= 0.0f) {
+        return 0.0f;
+    }
+
+    auto record = SampleMaterialRecord(texcoord);
+    const GfVec3f baseColor = Saturate(record.diffuseColor);
+    const float roughness = std::clamp(record.roughness, 0.04f, 1.0f);
+    const float metallic = Saturate(record.metallic);
+    const float dielectricF0 = FresnelFromIor(record.ior);
+    const GfVec3f f0 = (1.0f - metallic) * GfVec3f(dielectricF0) +
+                       metallic * baseColor;
+    const float specularProb =
+        SpecularSampleProbability(f0, roughness, metallic);
+    const float exponent = RoughnessToPhongExponent(roughness);
+    const GfVec3f reflection = ReflectAboutNormal(wo).GetNormalized();
+
+    const float pdfDiffuse = DiffusePdf(wi);
+    const float pdfGlossy = GlossyPdf(wi, reflection, exponent);
+    return (1.0f - specularProb) * pdfDiffuse + specularProb * pdfGlossy;
 }
 
 RUZINO_NAMESPACE_CLOSE_SCOPE

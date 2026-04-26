@@ -7,6 +7,7 @@
 
 RUZINO_NAMESPACE_OPEN_SCOPE
 class Hd_RUZINO_RenderParam;
+class Hd_RUZINO_RenderBuffer;
 using namespace pxr;
 class Hd_RUZINO_Renderer {
    public:
@@ -20,6 +21,7 @@ class Hd_RUZINO_Renderer {
     {
         return _completedSamples.load();
     }
+    Hd_RUZINO_RenderBuffer* GetAovRenderBuffer(const TfToken& name) const;
 
     void MarkAovBuffersUnconverged();
 

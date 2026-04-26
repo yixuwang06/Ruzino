@@ -25,7 +25,9 @@ void main(uint2 DTid: SV_DispatchThreadID)
 
     float4 inputColor = gInputTexture.Load(int3(DTid, 0));
     float exposure = max(cbToneMappingParams, 0.0f);
-    float3 hdr = max(inputColor.rgb * exposure, 0.0f);
+    // Keep the runtime HW7 display path closer to the CPU Embree path:
+    // clamp bright outliers first, then apply the same ACES exposure.
+    float3 hdr = min(max(inputColor.rgb, 0.0f), 16.0f) * exposure;
     float3 mapped = aces_fitted(hdr);
 
     gOutputTexture[DTid] = float4(mapped, inputColor.a);

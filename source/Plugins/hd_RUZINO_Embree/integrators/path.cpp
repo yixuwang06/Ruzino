@@ -8,6 +8,19 @@
 RUZINO_NAMESPACE_OPEN_SCOPE
 using namespace pxr;
 
+namespace {
+
+GfVec3f ClampFireflyContribution(const GfVec3f& value, float maxComponent = 8.0f)
+{
+    float peak = std::max(value[0], std::max(value[1], value[2]));
+    if (peak <= maxComponent || peak <= 0.0f) {
+        return value;
+    }
+    return value * (maxComponent / peak);
+}
+
+}  // namespace
+
 VtValue PathIntegrator::Li(const GfRay& ray, std::default_random_engine& random)
 {
     std::uniform_real_distribution<float> uniform_dist(
@@ -71,6 +84,7 @@ GfVec3f PathIntegrator::EstimateOutGoingRadiance(
                 bounceRay, uniform_float, recursion_depth + 1);
             globalLight = GfCompMult(brdf, bouncedRadiance) *
                           (cosTheta / (pdf * continueProb));
+            globalLight = ClampFireflyContribution(globalLight);
         }
     }
 

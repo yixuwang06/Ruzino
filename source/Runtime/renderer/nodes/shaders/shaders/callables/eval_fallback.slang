@@ -8,9 +8,11 @@ import utils.Spectrum;
 [shader("callable")]
 void eval_fallback(inout EvalCallableData data)
 {
+    const float kInvPi = 0.31830988618f;
     float3 color3 = float3(0.8);  // Default color for fallback
-    data.color =
-        Spectrum(color3 * max(0.0, dot(data.L, data.vertexInfo.normalW)));
+    float nDotL = max(0.0, dot(normalize(data.L), data.vertexInfo.normalW));
+    data.color = Spectrum(color3 * kInvPi);
+    data.evalPdf = nDotL * kInvPi;
 
     data.sampledDir =
         sample_cosine_hemisphere_concentric(random_float2(data.seed), data.pdf);

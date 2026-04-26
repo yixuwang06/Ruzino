@@ -582,6 +582,15 @@ VtValue Hd_RUZINO_RenderDelegate::GetRenderSetting(TfToken const& key) const
         return VtValue(_renderer ? _renderer->GetCompletedSamples() : 0);
     }
 
+    if (key == TfToken("RuzinoColorAovRenderBuffer")) {
+        auto* render_buffer =
+            _renderer ? _renderer->GetAovRenderBuffer(HdAovTokens->color)
+                      : nullptr;
+        if (render_buffer) {
+            return VtValue(reinterpret_cast<const void*>(render_buffer));
+        }
+    }
+
 
 #ifdef RUZINO_DIRECT_VK_DISPLAY
     if (key == TfToken("VulkanColorAov")) {

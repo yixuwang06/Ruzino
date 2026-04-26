@@ -15,6 +15,7 @@ struct EvalCallableData {
     float3 V;
     float3 sampledDir;
     float pdf;
+    float evalPdf;
     uint seed;
     uint eta_flipped;
     uint material_params_index; // Index into material parameters buffer, set by data fetch callable
