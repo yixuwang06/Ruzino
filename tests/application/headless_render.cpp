@@ -201,69 +201,6 @@ bool ReadTextureFromRenderNodeSystem(
     return false;
 }
 
-bool ConfigureHeadlessRenderNodeSystem(
-    UsdImagingGLEngine* renderer,
-    int spp)
-{
-    auto value = renderer->GetRendererSetting(pxr::TfToken("RenderNodeSystem"));
-    if (!value.IsHolding<const void*>()) {
-        spdlog::warn("RenderNodeSystem renderer setting is unavailable");
-        return false;
-    }
-
-    auto node_system_ptr =
-        static_cast<const std::shared_ptr<NodeSystem>*>(value.Get<const void*>());
-    if (!node_system_ptr || !(*node_system_ptr)) {
-        spdlog::warn("RenderNodeSystem renderer setting returned a null node system");
-        return false;
-    }
-
-    auto node_system = *node_system_ptr;
-    auto* tree = node_system->get_node_tree();
-    if (!tree) {
-        spdlog::warn("RenderNodeSystem is missing a node tree");
-        return false;
-    }
-
-    const int target_samples = std::max(1, spp);
-    bool updated_any_socket = false;
-    for (auto&& node : tree->nodes) {
-        if (!node || std::string(node->typeinfo->id_name) != "accumulate") {
-            continue;
-        }
-
-        auto* max_samples_socket = node->get_input_socket("Max Samples");
-        if (!max_samples_socket) {
-            continue;
-        }
-
-        if (max_samples_socket->dataField.value &&
-            max_samples_socket->dataField.value.allow_cast<int>()) {
-            max_samples_socket->dataField.value.cast<int&>() = target_samples;
-        }
-        else {
-            max_samples_socket->dataField.value = target_samples;
-        }
-
-        updated_any_socket = true;
-        spdlog::info(
-            "Configured accumulate node '{}' Max Samples to {} for headless export",
-            node->ui_name.empty() ? node->typeinfo->id_name.c_str()
-                                  : node->ui_name.c_str(),
-            target_samples);
-    }
-
-    if (updated_any_socket) {
-        tree->SetDirty(true);
-    }
-    else {
-        spdlog::warn(
-            "No accumulate node was found while configuring headless sample budget");
-    }
-
-    return updated_any_socket;
-}
-
 bool ReadEmbreeRenderBuffer(
     UsdImagingGLEngine* renderer,
     int width,
@@ -582,10 +519,6 @@ int main(int argc, char* argv[])
                 std::string nodes_json = LoadJSONScript(json_script);
                 (*node_system)->get_node_tree()->deserialize(nodes_json);
                 spdlog::info("Loaded JSON script: {}", json_script);
-                if (is_ruzino_renderer) {
-                    ConfigureHeadlessRenderNodeSystem(
-                        renderer.get(), std::max(1, spp));
-                }
             }
         }
 
